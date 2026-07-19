@@ -15,11 +15,17 @@ fs.writeFileSync(path.join(root, 'alpha.txt'), 'alpha');
 fs.writeFileSync(path.join(nested, 'beta.bin'), Buffer.from([1, 2, 3]));
 fs.writeFileSync(outside, 'outside');
 
+// Windows 上 os.tmpdir() 可能返回 8.3 短路径（如 RUNNER~1），而服务端会把
+// 路径规范化为真实长路径；比较前统一展开，避免短/长路径假性不等。
+const canonicalPath = (value) => {
+  try { return fs.realpathSync.native(value); } catch { return path.resolve(value); }
+};
+
 try {
   const service = new ComputerFileService({ roots: [root], maxEntries: 100 });
   const roots = service.listRoots();
   assert.strictEqual(roots.length, 1);
-  assert.strictEqual(path.resolve(roots[0].path), path.resolve(root));
+  assert.strictEqual(canonicalPath(roots[0].path), canonicalPath(root));
 
   const listing = service.listDirectory(root);
   assert.strictEqual(listing.parentPath, null, '受限根目录不能向上越界');
@@ -27,7 +33,7 @@ try {
   assert.ok(listing.entries.some((item) => item.kind === 'file' && item.name === 'alpha.txt' && item.size === 5));
 
   const nestedListing = service.listDirectory(nested);
-  assert.strictEqual(path.resolve(nestedListing.parentPath), path.resolve(root));
+  assert.strictEqual(canonicalPath(nestedListing.parentPath), canonicalPath(root));
   assert.ok(nestedListing.entries.some((item) => item.name === 'beta.bin'));
 
 
