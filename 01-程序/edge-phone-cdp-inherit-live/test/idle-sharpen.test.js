@@ -123,6 +123,7 @@ async function main() {
     cwd: ROOT,
     env: {
       ...process.env,
+      LISTEN_HOST: '127.0.0.1',
       PORT: String(httpPort),
       PHONE_TOKEN: token,
       CDP_BROWSER_WS: `ws://127.0.0.1:${cdpPort}`,

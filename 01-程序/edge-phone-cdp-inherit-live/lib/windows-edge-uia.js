@@ -59,11 +59,17 @@ function chooseTargetFromUia(targets, uiaState = {}, options = {}) {
 
     // Edge sometimes omits the query string or a trailing path separator in the
     // address-bar accessibility value. Only accept a prefix match when unique.
-    const prefixUrl = candidates.filter((target) => {
-      const candidate = normalizeAddress(target.url);
-      return candidate && (candidate.startsWith(address) || address.startsWith(candidate));
-    });
-    if (prefixUrl.length === 1) return { target: prefixUrl[0], confidence: 'url-prefix' };
+    // 地址栏还会随用户逐字输入而变化：单个字符 "c" 也能唯一前缀命中某个
+    // 标签，导致打字期间手机被切走。只有看起来像完整地址（足够长且含
+    // "." 或 ":"）的值才允许前缀匹配；不确定时保持当前标签。
+    const plausibleAddress = address.length >= 6 && /[.:]/.test(address);
+    if (plausibleAddress) {
+      const prefixUrl = candidates.filter((target) => {
+        const candidate = normalizeAddress(target.url);
+        return candidate && (candidate.startsWith(address) || address.startsWith(candidate));
+      });
+      if (prefixUrl.length === 1) return { target: prefixUrl[0], confidence: 'url-prefix' };
+    }
   }
 
   const title = normalizeTabTitle(uiaState.tabTitle || uiaState.windowTitle);
@@ -126,7 +132,10 @@ class EdgeUiaMonitor extends EventEmitter {
     const child = spawn('powershell.exe', [
       '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
       '-File', this.scriptPath,
-      '-PollMs', String(this.pollMs)
+      '-PollMs', String(this.pollMs),
+      // 控制器被强制结束（停止脚本 Stop-Process、关窗口）时收不到任何信号，
+      // 监视脚本靠轮询父进程存活自行退出，避免留下常驻的隐藏 powershell。
+      '-ParentPid', String(process.pid)
     ], {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']

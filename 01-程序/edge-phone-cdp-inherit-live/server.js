@@ -279,7 +279,10 @@ const edgeHistory = new EdgeHistoryService({
   userDataDir: EDGE_USER_DATA_DIR,
   profileDirectory: EDGE_PROFILE_DIRECTORY,
   maxLimit: BROWSER_HISTORY_MAX_ENTRIES,
-  snapshotRoot: path.join(DATA_DIR, 'history-snapshots')
+  snapshotRoot: path.join(DATA_DIR, 'history-snapshots'),
+  // 查询是同步的,会阻塞整个事件循环（帧泵/触摸都停）。Edge 正持锁时不值得
+  // 等满默认 2.5 秒——300ms 内拿不到就走快照副本路径。
+  busyTimeoutMs: 300
 });
 
 const STREAM_PRESETS = Object.freeze({
@@ -338,6 +341,15 @@ try {
   for (const item of rotated.slice(5)) fs.rmSync(path.join(LOG_DIR, item.name), { force: true });
 } catch {}
 const logStream = fs.createWriteStream(LOG_PATH, { flags: 'a' });
+// 磁盘满/杀毒锁文件时流会报错：没有监听器的话会打到 uncaughtException。
+// 只提示一次,之后文件日志静默停用（内存 recentLogs 与控制台照常工作）。
+let logStreamFailed = false;
+logStream.on('error', (error) => {
+  if (!logStreamFailed) {
+    logStreamFailed = true;
+    console.warn(`日志文件写入失败，文件日志已停用：${error.message}`);
+  }
+});
 const recentLogs = [];
 
 function log(level, message, details = undefined) {
@@ -902,6 +914,7 @@ class CdpController {
     this.endpoint = '';
     this.transportPromise = null;
     this.connectPromise = null;
+    this.connectPromiseTargetId = null;
     this.pending = new Map();
     this.nextId = 1;
     this.sessionId = null;
@@ -2344,17 +2357,28 @@ class CdpController {
 
   async ensureConnected(targetId = null, options = {}) {
     if (this.isOpen() && (!targetId || this.target?.id === targetId)) return;
-    if (this.connectPromise) return this.connectPromise;
+    if (this.connectPromise) {
+      // 在途连接若目标不同，不能直接复用其结果——那会把用户显式选择的
+      // 标签静默丢掉（selectTarget 返回 ok 却没切换）。等它结束后按请求
+      // 的目标重新确保连接。
+      if (!targetId || this.connectPromiseTargetId === targetId) return this.connectPromise;
+      await this.connectPromise.catch(() => {});
+      return this.ensureConnected(targetId, options);
+    }
     const connectOptions = {
       activate: typeof options.activate === 'boolean' ? options.activate : !this.followDesktopTabs,
       reason: String(options.reason || (targetId ? 'target' : 'connect'))
     };
     const promise = this.lifecycleQueue.run(() => this.connect(targetId, connectOptions));
     this.connectPromise = promise;
+    this.connectPromiseTargetId = targetId || null;
     try {
       return await promise;
     } finally {
-      if (this.connectPromise === promise) this.connectPromise = null;
+      if (this.connectPromise === promise) {
+        this.connectPromise = null;
+        this.connectPromiseTargetId = null;
+      }
       if (!this.isOpen()) this.scheduleReconnect();
     }
   }
@@ -2977,8 +3001,16 @@ class CdpController {
       this.lastRecoveryActionAt = now;
       if (this.consecutiveSnapshotFailures >= 5) {
         const targetId = this.target?.id;
+        const staleSessionId = this.sessionId;
         this.sessionId = null;
         this.screencastRunning = false;
+        // 先置空 sessionId 会让 connect() 跳过它的分离分支：旧会话必须在这里
+        // 显式分离并作废文件选择拦截，否则每次重挂载都在浏览器连接上遗留一个
+        // 附加会话（还可能挂着上传拦截，压住桌面的原生文件对话框）。
+        if (staleSessionId) {
+          this.invalidateFileChooser('watchdog-reattach');
+          await this.sendBrowser('Target.detachFromTarget', { sessionId: staleSessionId }).catch(() => {});
+        }
         this.bumpFrameEpoch('reattach');
         await this.ensureConnected(targetId, { activate: false, reason: 'watchdog-reattach' }).catch(() => {});
       } else {
@@ -3209,9 +3241,11 @@ class CdpController {
     if (!set.size) {
       // 集合为空可能只是 Browser.getWindowForTarget 短暂超时（CDP 抖动），
       // 不等于窗口已关闭。先确认窗口确实不存在再清除记录，避免之后误创建
-      // 第二个专用窗口。
+      // 第二个专用窗口。窗口确认仍在时返回空集合（区别于 null=不过滤）：
+      // 消费方一律按"保守不动"处理——跟随不切换、面板只显示当前标签、
+      // createTab 明确报错让用户重试，绝不把手机标签开进用户主窗口。
       const bounds = await this.sendBrowser('Browser.getWindowBounds', { windowId: this.dedicatedWindowId }, { timeout: 5000 }).catch(() => null);
-      if (bounds) return null;
+      if (bounds) return set;
       this.dedicatedWindowId = null;
       return null;
     }
@@ -3285,7 +3319,7 @@ class CdpController {
     await this.ensureTransport();
     if (this.dedicatedWindowEnabled) {
       const set = await this.dedicatedTargetIdSet();
-      if (!set || !set.size) {
+      if (!set) {
         // 专用窗口尚不存在：直接以目标网址创建它。
         const createdId = await this.ensureDedicatedWindow(normalizeUrl(rawUrl));
         if (createdId) {
@@ -3293,6 +3327,10 @@ class CdpController {
           await this.recoverFrames(true);
           return createdId;
         }
+      } else if (!set.size) {
+        // 窗口仍在但暂时无法枚举其中的标签（CDP 抖动）：宁可让用户稍后
+        // 重试，也不能失去锚点后把手机标签开进用户的主 Edge 窗口。
+        throw new Error('手机专用窗口状态暂时无法确认，请稍后重试。');
       } else {
         // 新标签应落在专用窗口：先激活其中一个标签，Edge 会把新标签开在活动窗口。
         const anchor = this.target?.id && set.has(this.target.id) ? this.target.id : [...set][0];
@@ -4779,12 +4817,17 @@ wss.on('connection', (ws, req, info) => {
             await new Promise((resolve, reject) => {
               const onFinish = () => { cleanup(); resolve(); };
               const onError = (error) => { cleanup(); reject(error); };
+              // 断线清理会 destroy() 流,此时只触发 'close'（无 finish/error）,
+              // 不监听它的话本 Promise 与整条消息队列会永久悬挂并泄漏。
+              const onClose = () => { cleanup(); reject(new Error('上传文件流已关闭')); };
               const cleanup = () => {
                 stream.off('finish', onFinish);
                 stream.off('error', onError);
+                stream.off('close', onClose);
               };
               stream.once('finish', onFinish);
               stream.once('error', onError);
+              stream.once('close', onClose);
               stream.end();
             });
             if (upload.streamError) throw upload.streamError;
@@ -4950,6 +4993,12 @@ async function shutdown(signal) {
   clearTimeout(cdp.visualDemandTimer);
   clearTimeout(cdp.manualCompatibilityRefreshTimer);
   clearTimeout(cdp.fileChooserArmTimer);
+  // 这些定时器若在关停窗口内触发,会经 listTargets→ensureTransport 重新拨号
+  // 一条全新的 Edge WebSocket。
+  clearTimeout(cdp.tabsTimer);
+  clearTimeout(cdp.layoutRefreshTimer);
+  clearTimeout(cdp.desktopTabProbeTimer);
+  clearTimeout(hub.releaseTimer);
   cdp.uiaMonitor?.stop();
   for (const state of hub.clients.values()) {
     try { state.ws.close(1001, '服务器停止'); } catch {}

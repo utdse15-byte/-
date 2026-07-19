@@ -578,6 +578,9 @@
         previous.onclose = null;
         previous.close();
       } catch {}
+      // 旧连接的 onclose 已被摘除，不会再替在途请求收尾；这里立即拒绝,
+      // 避免它们各自等满超时（上传确认最长 60 秒）才报错。
+      rejectAllRequests('连接已重建');
     }
 
     if (!state.currentFrame) {
@@ -613,6 +616,8 @@
       state.lastDisplayedTargetId = null;
       state.frameTransitionReason = '';
       state.frameTransitionAt = 0;
+      // 旧连接排队待渲染的帧一律作废（其元数据带着重启前的大编号）。
+      state.queuedFrame = null;
       state.reconnectAttempt = 0;
       state.reconnectDueAt = 0;
       setOverlay('tokenOverlay', false);
@@ -1021,7 +1026,17 @@
         break;
       case 'role':
         state.role = message.role || 'viewer';
-        if (state.role !== 'controller') state.preferencesAppliedForConnection = false;
+        if (state.role !== 'controller') {
+          state.preferencesAppliedForConnection = false;
+          // 只读手机发出的 viewport 不会被应用；若挂起标志已被本机的发送
+          // 置位，这里立即解除，避免持续丢帧到看门狗超时。
+          if (state.viewportSyncPending) {
+            state.viewportSyncPending = false;
+            state.viewportSyncReason = '';
+            clearTimeout(state.viewportSyncWatchdogTimer);
+            state.viewportSyncWatchdogTimer = null;
+          }
+        }
         updateRoleUi();
         applyControllerPreferences();
         break;
@@ -1123,6 +1138,9 @@
       case 'uploadCancelled': {
         const chooserId = message.chooserId || null;
         if (state.pendingChooser && chooserId && state.pendingChooser.id !== chooserId) break;
+        // 上传进行中被服务端取消（选择框失效/其他端取消）时要立刻停止分块
+        // 发送，而不是等发满一个确认窗口后才报"上传失败"。
+        state.uploadAbort = Boolean(state.uploading);
         state.pendingChooser = null;
         elements.uploadStatus.textContent = '已取消。';
         clearUploadCloseTimer();
@@ -1220,7 +1238,9 @@
     if (epoch > state.expectedFrameEpoch) beginFrameTransition(epoch, metadata.source || transport, targetId);
     state.lastFrameReceivedAt = Date.now();
     state.lastServerSequence = Math.max(state.lastServerSequence, sequence);
-    state.queuedFrame = { blob, metadata: { ...metadata, transport }, receivedAt: performance.now() };
+    // 帧打上连接代号：重连后旧连接的帧仍可显示，但不得把 epoch/序号门槛
+    // 抬回重启前的水平（否则新服务端的小编号帧会再次被全部丢弃）。
+    state.queuedFrame = { blob, metadata: { ...metadata, transport, connectionGeneration: state.connectionGeneration }, receivedAt: performance.now() };
     if (!state.rendering) processFrameQueue();
   }
 
@@ -1391,18 +1411,26 @@
           clearTimeout(state.viewportSyncWatchdogTimer);
           state.viewportSyncWatchdogTimer = null;
         }
-        completeFrameTransition(Number(frame.metadata.epoch) || 0);
-        if (frame.metadata.targetId) state.activeTabId = frame.metadata.targetId;
-        state.lastRenderedSequence = Math.max(state.lastRenderedSequence, Number(frame.metadata.sequence) || 0);
+        // 旧连接的帧（重连前排队/渲染中/被 requeue 的）只负责显示,不参与
+        // 排序门槛：否则它会把 epoch/序号抬回重启前的水平,重新冻结画面。
+        const sameGeneration = !frame.metadata.connectionGeneration ||
+          frame.metadata.connectionGeneration === state.connectionGeneration;
+        if (sameGeneration) {
+          completeFrameTransition(Number(frame.metadata.epoch) || 0);
+          if (frame.metadata.targetId) state.activeTabId = frame.metadata.targetId;
+          state.lastRenderedSequence = Math.max(state.lastRenderedSequence, Number(frame.metadata.sequence) || 0);
+          if (String(frame.metadata.source || frame.metadata.transport || '').startsWith('screencast')) {
+            state.lastStreamFrameSequence = Math.max(state.lastStreamFrameSequence, Number(frame.metadata.sequence) || 0);
+          }
+          const timestamp = Number(frame.metadata.timestamp) || 0;
+          if (timestamp) state.lastDisplayedTimestamp = Math.max(state.lastDisplayedTimestamp, timestamp);
+          state.lastDisplayedTargetId = frame.metadata.targetId || state.lastDisplayedTargetId;
+        }
         state.lastFrameRenderedAt = Date.now();
         state.lastFrameSource = frame.metadata.source || frame.metadata.transport || 'unknown';
         if (String(state.lastFrameSource).startsWith('screencast')) {
           state.lastStreamFrameRenderedAt = Date.now();
-          state.lastStreamFrameSequence = Math.max(state.lastStreamFrameSequence, Number(frame.metadata.sequence) || 0);
         }
-        const timestamp = Number(frame.metadata.timestamp) || 0;
-        if (timestamp) state.lastDisplayedTimestamp = Math.max(state.lastDisplayedTimestamp, timestamp);
-        state.lastDisplayedTargetId = frame.metadata.targetId || state.lastDisplayedTargetId;
         state.fallbackFailures = 0;
         if (candidate === 'image') state.imageFailures = Math.max(0, state.imageFailures - 1);
         else state.canvasFailures = Math.max(0, state.canvasFailures - 1);
@@ -1573,6 +1601,17 @@
     }
   }
 
+  // fetchFrameFallback 在帧入队后即返回，渲染是异步的。校准等需要"确实
+  // 有画面"的入口在恢复后要短暂等待渲染完成，否则恢复成功也会误报无画面。
+  async function waitForRenderedFrame(timeoutMs = 1500) {
+    const deadline = performance.now() + timeoutMs;
+    while (performance.now() < deadline) {
+      if (state.currentFrame && state.currentGeometry) return true;
+      await sleep(50);
+    }
+    return Boolean(state.currentFrame && state.currentGeometry);
+  }
+
   function updateFrameBadge() {
     if (state.resizeSettling || state.viewportSyncPending) {
       elements.frameBadge.textContent = '尺寸同步中 · 保留旧画面';
@@ -1688,6 +1727,32 @@
     }, 950);
   }
 
+  // viewport 消息没有应答：如果服务端当时恰好无法应用（Edge 正在重启），
+  // 同步标志会永远挂起——所有旧修订号的帧被丢弃、触摸被拒绝。看门狗在超时
+  // 后解除挂起，仅在本机是控制者时重发一次视口。
+  function armViewportSyncWatchdog() {
+    clearTimeout(state.viewportSyncWatchdogTimer);
+    state.viewportSyncWatchdogTimer = setTimeout(() => {
+      state.viewportSyncWatchdogTimer = null;
+      if (!state.viewportSyncPending) return;
+      // 只读手机的 viewport 会被服务端拒绝：绝不能重发（修订号会越追越远、
+      // 每次都触发一条错误提示），只解除挂起、继续显示控制手机的画面。
+      if (state.role !== 'controller') {
+        state.viewportSyncPending = false;
+        state.viewportSyncReason = '';
+        return;
+      }
+      // 手势进行中或旋转尺寸未稳定时不强行重发（会取消手势/发出过渡尺寸），
+      // 推迟到下个周期再试。
+      if (state.gesture || state.resizeSettling) {
+        armViewportSyncWatchdog();
+        return;
+      }
+      state.viewportSyncPending = false;
+      if (wsIsOpen()) sendViewport(true, 'viewport-retry');
+    }, 4000);
+  }
+
   function sendViewport(force = false, reason = 'viewport') {
     if (!wsIsOpen()) return false;
     const size = stageSize();
@@ -1730,16 +1795,7 @@
     state.requestedViewportRevision = revision;
     state.viewportSyncPending = true;
     state.viewportSyncReason = reason;
-    // viewport 消息没有应答：如果服务端当时恰好无法应用（Edge 正在重启），
-    // 同步标志会永远挂起——所有旧修订号的帧被丢弃、触摸被拒绝。看门狗在
-    // 超时后解除挂起并重发一次视口，避免永久卡在"尺寸同步中"。
-    clearTimeout(state.viewportSyncWatchdogTimer);
-    state.viewportSyncWatchdogTimer = setTimeout(() => {
-      state.viewportSyncWatchdogTimer = null;
-      if (!state.viewportSyncPending) return;
-      state.viewportSyncPending = false;
-      if (wsIsOpen()) sendViewport(true, 'viewport-retry');
-    }, 4000);
+    armViewportSyncWatchdog();
     state.lastSentViewport = { ...next, revision };
     state.viewport = { ...state.viewport, ...next, revision };
     send({ type: 'viewport', ...next, revision, force: Boolean(force), reason });
@@ -2037,11 +2093,14 @@
   }
 
   async function cancelAutoCalibration(options = {}) {
-    const { silent = false, removeRemote = true } = options;
+    const { silent = false } = options;
     const wizard = state.calibrationWizard;
     state.calibrationWizard = null;
     if (wizard?.timeoutTimer) clearTimeout(wizard.timeoutTimer);
-    if (removeRemote) await removeRemoteCalibrationVisual('calibrationMarker');
+    // v6.7 起校准标记只存在于本页（无远端 DOM），取消时必须无条件隐藏；
+    // 旧的 removeRemote 开关会让断线/切标签路径把红色目标十字永久留在
+    // 画面上，重连后用户点它就变成一次真实点击。
+    await removeRemoteCalibrationVisual('calibrationMarker');
     updateCalibrationGuide();
     if (!silent) showToast('已取消自动校准', 'warn', 1800);
   }
@@ -2151,7 +2210,7 @@
     ensureCalibrationProfileCurrent('auto-calibration', { silent: true });
     if (!state.currentFrame || !state.currentGeometry) {
       await recoverFrame(false);
-      if (!state.currentFrame || !state.currentGeometry) {
+      if (!(await waitForRenderedFrame())) {
         showToast('当前没有画面，无法开始自动校准。', 'error', 3500);
         return;
       }
@@ -2198,7 +2257,10 @@
     }
     if (!state.currentGeometry || !state.currentFrame) {
       await recoverFrame(false);
-      if (!state.currentGeometry) return;
+      if (!(await waitForRenderedFrame())) {
+        showToast('当前没有画面，无法开始点击测试。', 'error', 3200);
+        return;
+      }
     }
     if (state.calibrationWizard) await cancelAutoCalibration({ silent: true });
     ensureCalibrationProfileCurrent('calibration-test', { silent: true });
@@ -3200,6 +3262,9 @@
     elements.uploadProgress.max = totalBytes || 1;
     elements.uploadProgress.value = 0;
     elements.uploadStatus.textContent = '正在建立手机文件传输会话…';
+    // 记住本次上传对应的选择框：失败清理时只取消它，不得取消服务端当时
+    // 恰好挂着的更新选择框（否则用户的重试会被上一次失败的收尾误杀）。
+    const uploadChooserId = state.pendingChooser?.id || null;
     let sentBytes = 0;
 
     try {
@@ -3256,7 +3321,7 @@
     } catch (error) {
       elements.uploadStatus.textContent = error.message;
       showToast(`上传失败：${error.message}`, 'error', 5000);
-      try { await request('cancelUpload', {}, 12000); } catch {}
+      try { await request('cancelUpload', { chooserId: uploadChooserId }, 12000); } catch {}
     } finally {
       state.uploading = false;
       state.uploadAbort = false;
@@ -4153,7 +4218,10 @@
       event.preventDefault();
       state.canvasFailures += 3;
       showToast('Canvas 上下文丢失，已切换兼容渲染', 'warn', 3000);
-      if (state.currentFrame) enqueueFrame(state.currentFrame.blob, state.currentFrame.metadata, 'context-recovery');
+      // 不能走 enqueueFrame：当前帧的序号必然 <= lastRenderedSequence，会被
+      // 去重门槛直接丢弃，画面停留在丢失前的空白。requeueCurrentFrame 绕过
+      // 去重，用图片渲染器立即重画。
+      requeueCurrentFrame();
     });
   }
 
