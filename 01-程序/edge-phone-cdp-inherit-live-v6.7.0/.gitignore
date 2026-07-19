@@ -1,0 +1,4 @@
+node_modules/
+logs/*.log
+data/access-token.txt
+diagnostics/

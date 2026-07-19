@@ -1,0 +1,13 @@
+{
+  "name": "Edge 手机控制器",
+  "short_name": "Edge 控制",
+  "description": "在 Android 手机上查看并触摸控制 Windows Edge 网页",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#020617",
+  "theme_color": "#0b1220",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
