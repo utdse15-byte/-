@@ -52,6 +52,11 @@ jobs:
         run: npm ci
       - name: Syntax check
         run: npm run check
+      - name: Unit / mock CDP tests on Windows
+        # 用户环境为 Windows-only，安装依赖.cmd 会在真机执行同一套测试；
+        # 此步骤保证整套单元/模拟测试在 Windows 上真实通过。
+        timeout-minutes: 15
+        run: npm test
       - name: Parse UIA helper with real PowerShell
         shell: pwsh
         run: |
