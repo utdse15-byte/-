@@ -402,12 +402,17 @@ function waitForStreamDrain(stream) {
   return new Promise((resolve, reject) => {
     const onError = (error) => { cleanup(); reject(error); };
     const onDrain = () => { cleanup(); resolve(); };
+    // destroy()（无错误参数）只会触发 'close'：不监听它的话，等待背压的
+    // 上传处理链会永远悬挂并连同缓冲区一起泄漏。
+    const onClose = () => { cleanup(); reject(new Error('上传文件流已关闭')); };
     const cleanup = () => {
       stream.off('error', onError);
       stream.off('drain', onDrain);
+      stream.off('close', onClose);
     };
     stream.once('error', onError);
     stream.once('drain', onDrain);
+    stream.once('close', onClose);
   });
 }
 
@@ -706,8 +711,11 @@ class ClientHub {
 
     if (!this.controllerClientId || this.controllerClientId === info.clientId) {
       this.controllerClientId = info.clientId;
+      // 只有当控制者本人回来（或空缺被填补）时才取消晋升计时；其他设备
+      // 连入时保留计时器，否则控制权会一直挂在已离线的 clientId 上。
+      clearTimeout(this.releaseTimer);
+      this.releaseTimer = null;
     }
-    clearTimeout(this.releaseTimer);
     this.publishRoles();
     return state;
   }
@@ -2761,10 +2769,16 @@ class CdpController {
       return true;
     } catch (error) {
       this.screencastRunning = false;
+      const firstFailure = this.screencastSupported !== false;
       this.screencastSupported = false;
       this.frameMode = 'snapshot';
+      // 记录尝试时间，让看门狗按 15 秒节奏重试；否则失败后每秒重试一次，
+      // 手机端也会每秒收到一条相同的警告提示。提示只在首次失败时广播。
+      this.lastScreencastStartAt = Date.now();
       log('warn', 'Page.startScreencast 失败，将使用截图模式', { error: error.message });
-      hub.broadcastJson({ type: 'status', level: 'warn', message: '连续画面通道不可用，已切换到稳定截图模式。' });
+      if (firstFailure) {
+        hub.broadcastJson({ type: 'status', level: 'warn', message: '连续画面通道不可用，已切换到稳定截图模式。' });
+      }
       return false;
     }
   }
@@ -2901,20 +2915,25 @@ class CdpController {
 
   async recoverFrames(forceRestart = true) {
     if (this.frameRecoveryPromise) return this.frameRecoveryPromise;
-    this.frameRecoveryPromise = this.lifecycleQueue.run(async () => {
+    // ensureConnected 必须在 lifecycleQueue 之外执行：它内部会把 connect()
+    // 排进同一队列，如果本函数体也在队列里运行，就会等待排在自己身后的
+    // connect() 永远无法开始（可重入死锁），后续所有恢复与重连全部悬挂。
+    this.frameRecoveryPromise = (async () => {
       await this.ensureConnected(this.target?.id, { activate: false, reason: 'frame-recovery' });
-      if (!this.followDesktopTabs) {
-        await this.sendBrowser('Target.activateTarget', { targetId: this.target?.id }).catch(() => {});
-        await this.send('Page.bringToFront').catch(() => {});
-      }
-      if (forceRestart) {
-        await this.stopScreencast();
-        await this.startScreencast(true);
-      } else if (!this.screencastRunning) {
-        await this.startScreencast(false);
-      }
-      await this.captureSnapshot('manual-recovery', true);
-    }).finally(() => {
+      await this.lifecycleQueue.run(async () => {
+        if (!this.followDesktopTabs) {
+          await this.sendBrowser('Target.activateTarget', { targetId: this.target?.id }).catch(() => {});
+          await this.send('Page.bringToFront').catch(() => {});
+        }
+        if (forceRestart) {
+          await this.stopScreencast();
+          await this.startScreencast(true);
+        } else if (!this.screencastRunning) {
+          await this.startScreencast(false);
+        }
+        await this.captureSnapshot('manual-recovery', true);
+      });
+    })().finally(() => {
       this.frameRecoveryPromise = null;
     });
     return this.frameRecoveryPromise;
@@ -3188,6 +3207,11 @@ class CdpController {
       if (windowId === this.dedicatedWindowId) set.add(target.id);
     }
     if (!set.size) {
+      // 集合为空可能只是 Browser.getWindowForTarget 短暂超时（CDP 抖动），
+      // 不等于窗口已关闭。先确认窗口确实不存在再清除记录，避免之后误创建
+      // 第二个专用窗口。
+      const bounds = await this.sendBrowser('Browser.getWindowBounds', { windowId: this.dedicatedWindowId }, { timeout: 5000 }).catch(() => null);
+      if (bounds) return null;
       this.dedicatedWindowId = null;
       return null;
     }
@@ -3199,6 +3223,9 @@ class CdpController {
     if (this.dedicatedWindowId) {
       const existing = await this.dedicatedTargetIdSet();
       if (existing && existing.size) return null;
+      // dedicatedTargetIdSet 未清除记录，说明窗口仍然存在，只是暂时无法
+      // 枚举其中的标签；此时不要再创建一个重复的专用窗口。
+      if (this.dedicatedWindowId) return null;
     }
     const created = await this.sendBrowser('Target.createTarget', { url: initialUrl, newWindow: true });
     if (!created?.targetId) throw new Error('无法创建手机专用 Edge 窗口');
@@ -4471,7 +4498,11 @@ wss.on('connection', (ws, req, info) => {
         return;
       }
 
-      const preconnectTargetId = message.type === 'selectTarget' ? null : (message.targetId || null);
+      // closeTab 是浏览器级调用，不需要先附加到目标标签；否则关闭后台标签
+      // 会先把手机会话切到即将关闭的标签上，随后又落到任意其他标签。
+      const preconnectTargetId = (message.type === 'selectTarget' || message.type === 'closeTab')
+        ? null
+        : (message.targetId || null);
       await cdp.ensureConnected(preconnectTargetId, { activate: false, reason: 'phone-command' });
       let result = {};
       switch (message.type) {

@@ -16,8 +16,9 @@ function Stop-OldControllerOnPort {
             ($CommandLine.IndexOf($Here, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $CommandLine -match '(?i)edge-phone-cdp')
         $HealthMatches = $false
         try {
+            # /health 有意不返回 pid；能在该端口用本服务名应答的监听进程就是控制器。
             $Health = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 2
-            $HealthMatches = $Health.ok -eq $true -and $Health.service -eq 'edge-phone-cdp-controller' -and [int]$Health.pid -eq [int]$Connection.OwningProcess
+            $HealthMatches = $Health.ok -eq $true -and $Health.service -eq 'edge-phone-cdp-controller'
         } catch {}
         $IsThisController = $IsNodeServer -or $HealthMatches
         if ($IsThisController) {

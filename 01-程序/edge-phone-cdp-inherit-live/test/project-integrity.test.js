@@ -318,7 +318,13 @@ for (const name of ps1Files) {
 
 const cmdFiles = fs.readdirSync(root).filter((name) => name.endsWith('.cmd'));
 for (const name of cmdFiles) {
-  const text = fs.readFileSync(path.join(root, name), 'utf8');
+  const bytes = fs.readFileSync(path.join(root, name));
+  // cmd.exe 不识别 UTF-8 BOM：带 BOM 的批处理第一行会被拼上乱码字节，
+  // 每次双击都先报 "'∩╗┐@echo' 不是内部或外部命令"。.cmd 必须无 BOM，
+  // 且在包含中文脚本名的行之前先 chcp 65001。
+  assert.notDeepStrictEqual([...bytes.subarray(0, 3)], [0xEF, 0xBB, 0xBF], `${name} 不能带 UTF-8 BOM（cmd.exe 无法识别）`);
+  const text = bytes.toString('utf8');
+  assert.ok(!/(^|[^\r])\n/.test(text), `${name} 必须使用 CRLF 换行`);
   assert.ok(/ExecutionPolicy Bypass/i.test(text), `${name} 必须只对本次启动绕过签名限制`);
 }
 

@@ -19,7 +19,7 @@ import {
   rmSync, statSync, writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -28,12 +28,13 @@ const HANDOFF_DIR = join(REPO_ROOT, '02-AI交接');
 const OUT_DIR = resolve(process.argv[2] || join(REPO_ROOT, 'dist'));
 const MANIFEST_NAME = '文件校验清单-SHA256.txt';
 
-// 绝不进入发布包的路径（敏感或运行时产物）。相对 APP_DIR。
+// 绝不进入发布包的路径（敏感或运行时产物）。相对 APP_DIR，统一用 / 分隔
+// （复制过滤器里的 rel 已归一化为 /，不能用平台相关的 join）。
 const APP_EXCLUDES = new Set([
   '.git', 'logs', 'diagnostics',
-  join('data', 'access-token.txt'),
-  join('data', 'history-snapshots'),
-  join('test', 'fixtures', 'ui-preview.png')
+  'data/access-token.txt',
+  'data/history-snapshots',
+  'test/fixtures/ui-preview.png'
 ]);
 
 function fail(message) {
@@ -75,12 +76,14 @@ function main() {
   cpSync(APP_DIR, payloadDir, {
     recursive: true,
     filter: (src) => {
-      const rel = relative(APP_DIR, src);
+      // Windows 上 relative() 返回反斜杠路径，必须先归一化成 /，
+      // 否则下面所有前缀比较在 Windows 打包时都会静默失效。
+      const rel = relative(APP_DIR, src).split(sep).join('/');
       if (!rel) return true;
-      if (rel === 'node_modules' || rel.startsWith(`node_modules${'/'}`)) {
-        // 只保留生产依赖，剔除 .bin 与缓存元数据。
-        if (rel === join('node_modules', '.package-lock.json')) return false;
-        if (rel.startsWith(join('node_modules', '.bin'))) return false;
+      if (rel === 'node_modules' || rel.startsWith('node_modules/')) {
+        // 保留生产依赖与 node_modules/.package-lock.json（安装器自检的
+        // project-integrity.test.js 需要读取它），只剔除 .bin。
+        if (rel === 'node_modules/.bin' || rel.startsWith('node_modules/.bin/')) return false;
         return true;
       }
       for (const ex of APP_EXCLUDES) {

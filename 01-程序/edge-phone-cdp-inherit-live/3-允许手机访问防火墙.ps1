@@ -14,8 +14,9 @@ if (-not $IsAdmin) {
     exit
 }
 
-Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-Get-NetFirewallRule -DisplayName "Edge Phone CDP Controller 8765" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+# 清理本工具创建过的所有历史规则（含改过 controllerPort 后遗留的旧端口规则），
+# 避免早已不用的端口一直对局域网开放。
+Get-NetFirewallRule -DisplayName "Edge Phone CDP Controller *" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 
 New-NetFirewallRule `
     -DisplayName $RuleName `

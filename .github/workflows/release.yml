@@ -39,13 +39,28 @@ jobs:
         run: node scripts/package-release.mjs dist
       - name: Show artifacts
         run: ls -la dist
+      - name: Self-test packaged ZIP
+        # 发布门禁：解包正式 ZIP，在包内跑语法检查和完整单元/模拟测试，
+        # 确保最终用户拿到的压缩包能通过安装器自检（曾因打包排除
+        # node_modules/.package-lock.json 导致所有用户自检失败）。
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          STEM="edge-phone-cdp-inherit-live-v${VERSION}"
+          mkdir -p /tmp/zip-selftest
+          unzip -q "dist/${STEM}.zip" -d /tmp/zip-selftest
+          cd "/tmp/zip-selftest/${STEM}"
+          npm run check
+          npm test
       - name: Publish to GitHub Release
         # 标签推送直接发布；手动 dispatch 时用 tag_name 让 action 在当前提交上
         # 创建 v<版本> 标签再发布（Actions 的 GITHUB_TOKEN 有 contents:write）。
+        # target_commitish 必须显式指定：action 默认在仓库默认分支 HEAD 上建
+        # 标签，会让标签指向与构建产物不同的提交。
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: v${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
           files: |
             dist/*.zip
             dist/*.zip.sha256.txt

@@ -18,6 +18,25 @@ assert.strictEqual(normalizeAddress('https://www.ChatGPT.com/'), 'chatgpt.com');
 assert.strictEqual(normalizeAddress('claude.ai/new/'), 'claude.ai/new');
 assert.strictEqual(normalizeTabTitle('(2) Claude - Microsoft Edge'), 'claude');
 
+// 地址栏省略协议的 host:port 地址不能被误解析成自定义协议（曾导致
+// localhost:3000 这类内网/开发地址的标签跟随完全失效）。
+assert.strictEqual(normalizeAddress('localhost:3000/admin/panel'), 'localhost:3000/admin/panel');
+assert.strictEqual(normalizeAddress('http://localhost:3000/admin/panel'), 'localhost:3000/admin/panel');
+assert.strictEqual(normalizeAddress('nas:5000/index'), 'nas:5000/index');
+assert.strictEqual(normalizeAddress('about:blank'), 'blank');
+{
+  const hostPortTargets = [
+    { id: 'x', title: 'Admin', url: 'http://localhost:3000/admin/panel', controllable: true },
+    { id: 'y', title: 'Example', url: 'https://example.com/', controllable: true }
+  ];
+  const hostPortMatch = chooseTargetFromUia(hostPortTargets, {
+    edgeForeground: true,
+    address: 'localhost:3000/admin/panel',
+    tabTitle: '完全不同的标题'
+  });
+  assert.strictEqual(hostPortMatch?.target?.id, 'x', '省略协议的 host:port 地址必须能按 URL 匹配');
+}
+
 let matched = chooseTargetFromUia(targets, {
   edgeForeground: true,
   address: 'chatgpt.com/c/def',

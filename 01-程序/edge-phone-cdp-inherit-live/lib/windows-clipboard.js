@@ -15,7 +15,7 @@ const { execFile } = require('child_process');
 const DEFAULT_MAX_CHARS = 1000000;
 const DEFAULT_TIMEOUT_MS = 10000;
 
-function runCommand(command, { input = null, timeoutMs = DEFAULT_TIMEOUT_MS, maxBytes }) {
+function runCommand(command, { input = null, timeoutMs = DEFAULT_TIMEOUT_MS, maxBytes, operation = '读取' }) {
   return new Promise((resolve, reject) => {
     const [file, ...args] = command;
     const child = execFile(file, args, {
@@ -30,7 +30,7 @@ function runCommand(command, { input = null, timeoutMs = DEFAULT_TIMEOUT_MS, max
           return;
         }
         if (error.killed || error.signal === 'SIGTERM') {
-          reject(new Error('读取电脑剪贴板超时；请确认 Windows PowerShell 可用后重试。'));
+          reject(new Error(`${operation}电脑剪贴板超时；请确认 Windows PowerShell 可用后重试。`));
           return;
         }
         const detail = Buffer.isBuffer(stderr) ? stderr.toString('utf8').trim() : '';
@@ -95,7 +95,8 @@ class WindowsClipboardBridge {
     return this.exclusive(async () => {
       const text = await runCommand(command, {
         timeoutMs: this.timeoutMs,
-        maxBytes: this.maxChars * 4 + 65536
+        maxBytes: this.maxChars * 4 + 65536,
+        operation: '读取'
       });
       if (text.length > this.maxChars) {
         throw new Error(`电脑剪贴板内容超过 ${this.maxChars} 字符限制，请在电脑上分段复制。`);
@@ -117,7 +118,8 @@ class WindowsClipboardBridge {
       await runCommand(command, {
         input: value,
         timeoutMs: this.timeoutMs,
-        maxBytes: 1024 * 1024
+        maxBytes: 1024 * 1024,
+        operation: '写入'
       });
       return { chars: value.length };
     });
