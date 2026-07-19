@@ -1,0 +1,23 @@
+Edge 手机 CDP 控制器 v6.7.0 最终压缩包验证结果
+日期：2026-07-19
+
+独立程序 ZIP：edge-phone-cdp-inherit-live-v6.7.0.zip
+SHA-256：804857208956f77ccc18abff1a8e2a23e08fc4ca2ef4f000262c13b3573fa2de
+
+最终 ZIP 从空目录解压后的结果：
+- 内部文件 SHA-256：84 / 84 匹配
+- npm run check：PASS
+- npm test：PASS
+- test/browser-ui.test.js：SKIP（容器 Chromium 管理策略阻止全部 URL）
+- test/chromium-cdp-integration.test.js：PASS
+- AI 交接 DOCX 结构检查：PASS
+- 未包含 .git、controller.log、access-token.txt、诊断包或上传临时文件
+
+发布目录的真实 Chromium CDP 集成测试在最终代码上连续三轮通过。
+
+未在当前 Linux 构建环境完成：
+- Windows Edge Stable 原配置继承与真实 UI Automation 控件树
+- 127.0.0.1:7897 固定代理的实际联网行为
+- Windows 防火墙 LocalSubnet
+- Android 真机普通/沉浸全屏、软键盘、旋转、触摸及 Wi-Fi 延迟
+- ChatGPT/Claude 真实账号长期人工使用体验和平台判断

@@ -1,0 +1,22 @@
+# v6.7.0 程序 + AI 交接组合包内部 SHA-256 清单
+# 生成日期：2026-07-19
+# 文件数量（不含本清单）：17
+# 格式：SHA256  相对路径
+
+804857208956f77ccc18abff1a8e2a23e08fc4ca2ef4f000262c13b3573fa2de  01-程序/edge-phone-cdp-inherit-live-v6.7.0.zip
+2ebbfd6390c904be98d57b7a35bb090eb8fe5f1bdb3cac6780e3b09ae8517a16  01-程序/edge-phone-cdp-inherit-live-v6.7.0.zip.sha256.txt
+a86c12afacf66618e735a67dc9311fc958a412461a388dc13892151a7f4eb3f0  02-AI交接/AI交接-先读.md
+8475609ab30a58a86802e96ffdcda775d045aadcf43c99ab34446014b3a10503  02-AI交接/Edge手机远程浏览器控制器-需求与风险平衡规范-v1.1.docx
+0f1b751fdd849ea91a9b62957a56dfa1d94ab31d0da17dbf2328673c9e416366  02-AI交接/Edge手机远程浏览器控制器-需求与风险平衡规范-v1.1.md
+1ce2a8033c796048708c198f4f9f3142bd27d438eb16ffb02a27180bd7b2a5d9  02-AI交接/Edge手机远程浏览器控制器-需求基线-v1.1.yaml
+44860861d502aed2d7a287b073cdb3244855593a50212fb228e29f3803e5e362  02-AI交接/README-先读.md
+74bdac4ef7ac30e864dbec4a2275fd6b420d1073b3c781ba65c46f240a9025d1  02-AI交接/v6.7.0实现对照表.md
+b4756ae5caf5574c4057ccbe52e29dd2d5d8da19c1615afc6663571a28ce33c5  02-AI交接/历史问题与设计结论.md
+85e50b2e63c8a83bde6c69c14803ed5040a7f0db3b1003801b8846a2998b687c  02-AI交接/已知限制与后续路线.md
+7c776eb30ff7e8933340b29047d302f40415616cee08431d5e8b37231d13c6f7  02-AI交接/给下一位AI的提示词.txt
+6fa3d509ea70e6ec3fadd74e8331e6eadeaec922017b23d8be48c965d2fe3950  03-发布资料/README-中文.md
+82396552835868194c4604eaeb8b3e33be7e243b62a6973d5d8d767568231b10  03-发布资料/VERSION.txt
+aa49cb18bc3fa479115fddaa6d7a09db73bddfcd8ddbeb2134bd07168c6a4f9f  03-发布资料/发布验证报告.md
+cd75ab7070dca007be160cee75f984f9ca04eac122d350603d6686f99a028211  03-发布资料/更新说明-v6.7.0.md
+32e0a1af88e3c72e5eae0e9f7f64c0882ba92c0062ae8a180088fd67559a8166  03-发布资料/最终压缩包验证结果.txt
+e34c82dfdc370610efec612f2f3e0a5b3d10bf76cca6a514a6753a39a16a3070  README-先看这里.md
