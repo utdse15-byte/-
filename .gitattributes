@@ -1,0 +1,14 @@
+# 仓库为唯一事实源：文本统一存储为 LF，检出时按平台需要转换。
+* text=auto
+
+# Windows 启动脚本必须以 CRLF 检出（PowerShell/CMD + UTF-8 BOM 兼容，见 project-integrity 测试）
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件不做任何转换
+*.docx binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.ico binary
+*.zip binary

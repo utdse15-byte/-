@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'claude/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: 01-程序/edge-phone-cdp-inherit-live
+
+jobs:
+  ubuntu:
+    name: Ubuntu (check + tests + real Chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Install Chromium
+        id: chrome
+        uses: browser-actions/setup-chrome@v1
+      - name: Install dependencies
+        run: npm ci
+      - name: Syntax check
+        run: npm run check
+      - name: Unit / mock CDP tests
+        run: npm test
+      - name: Real Chromium CDP integration
+        env:
+          CHROMIUM_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: npm run test:real
+      - name: Browser UI test
+        env:
+          CHROMIUM_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: npm run test:browser
+
+  windows:
+    name: Windows (Edge + real PowerShell + clipboard)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: npm ci
+      - name: Syntax check
+        run: npm run check
+      - name: Unit / mock CDP tests on Windows
+        # 用户环境为 Windows-only，安装依赖.cmd 会在真机执行同一套测试；
+        # 此步骤保证整套单元/模拟测试在 Windows 上真实通过。
+        timeout-minutes: 15
+        run: npm test
+      - name: Parse UIA helper with real PowerShell
+        shell: pwsh
+        run: |
+          $tokens = $null; $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'helpers/edge-uia-monitor.ps1').Path, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+          Write-Host 'UIA helper parsed cleanly by Windows PowerShell.'
+      - name: Parse launcher/installer scripts
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem -Filter *.ps1 | ForEach-Object {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { Write-Error "$($_.Name): $($errors[0].Message)"; $failed = $true }
+          }
+          if ($failed) { exit 1 }
+          Write-Host 'All PowerShell scripts parsed cleanly.'
+      - name: Resolve Microsoft Edge
+        id: edge
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$Env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+            "${Env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+          )
+          $edge = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $edge) {
+            $cmd = Get-Command msedge -ErrorAction SilentlyContinue
+            if ($cmd) { $edge = $cmd.Source }
+          }
+          if (-not $edge) { Write-Error 'Microsoft Edge not found on runner.'; exit 1 }
+          Write-Host "Edge present: $edge"
+          "edge-path=$edge" | Out-File -FilePath $Env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Real Microsoft Edge CDP integration
+        # 关键：windows-latest 自带真实 Microsoft Edge，而 Edge 就是 Chromium 内核。
+        # 把真实 CDP 集成测试指向 msedge.exe，等于对“实际受控浏览器”的 CDP 行为
+        # 做每次提交自动验证，把大量“需 Windows Edge 验证”欠账变成回归测试。
+        env:
+          CHROMIUM_PATH: ${{ steps.edge.outputs.edge-path }}
+        timeout-minutes: 15
+        run: npm run test:real
+      - name: Clipboard bridge round-trip (real Get/Set-Clipboard)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          node -e "const {WindowsClipboardBridge}=require('./lib/windows-clipboard');(async()=>{const b=new WindowsClipboardBridge();const s='ci-clip-测试-'+process.pid;await b.write(s);const r=await b.read();if(r.text!==s){console.error('clipboard mismatch:',JSON.stringify(r));process.exit(1);}console.log('Clipboard bridge round-trip OK on real Windows.');})().catch(e=>{console.error(e.message);process.exit(1);});"
