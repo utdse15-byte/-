@@ -309,6 +309,11 @@ for (const name of ps1Files) {
   const text = bytes.toString('utf8');
   assert.ok(!/[\u2018\u2019\u201C\u201D]/.test(text), `${name} 不能包含弯引号`);
   assert.ok(!/(^|[^\r])\n/.test(text.replace(/^\uFEFF/, '')), `${name} 必须使用 CRLF 换行`);
+  // "$var:" 在 PowerShell 中被解析为作用域/驱动器限定变量，直接导致整个脚本
+  // 解析失败（CI Windows 作业曾在 6-导出诊断包.ps1 抓到此问题）。字符串里
+  // 变量后要接冒号时必须写 ${var}:。此检查排除 env:/script: 等合法限定符。
+  const invalidVarColon = text.match(/\$(?!\{)(?!env:|script:|global:|using:|local:|private:|variable:)[A-Za-z_][A-Za-z0-9_]*:/g);
+  assert.ok(!invalidVarColon, `${name} 存在非法的 $变量: 引用（应写 \${变量}:）：${invalidVarColon ? invalidVarColon[0] : ''}`);
 }
 
 const cmdFiles = fs.readdirSync(root).filter((name) => name.endsWith('.cmd'));

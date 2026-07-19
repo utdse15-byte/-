@@ -78,7 +78,7 @@ Add-Section "Edge and remote debugging" {
         "DevToolsActivePort not found"
     }
     if ($CdpPort) {
-        "CDP listener check for port $CdpPort:"
+        "CDP listener check for port ${CdpPort}:"
         $Listener = Get-NetTCPConnection -LocalPort $CdpPort -State Listen -ErrorAction SilentlyContinue
         if ($Listener) {
             $Listener | Format-Table LocalAddress, LocalPort, OwningProcess -AutoSize
