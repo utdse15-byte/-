@@ -1,7 +1,8 @@
 # 仓库为唯一事实源：文本统一存储为 LF，检出时按平台需要转换。
 * text=auto
 
-# Windows 启动脚本必须以 CRLF 检出（PowerShell/CMD + UTF-8 BOM 兼容，见 project-integrity 测试）
+# Windows 启动脚本必须以 CRLF 检出（见 project-integrity 测试）。
+# .ps1 需要 UTF-8 BOM（powershell.exe 识别编码）；.cmd 必须无 BOM（cmd.exe 不识别）。
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
 

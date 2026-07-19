@@ -20,8 +20,13 @@ function normalizeAddress(value) {
   let text = normalizeWhitespace(value);
   if (!text) return '';
   text = text.replace(/^view-source:/i, '');
+  // 地址栏可访问性文本常省略协议。"localhost:3000/x" 这类 host:port 会被
+  // URL 解析成自定义协议，必须先排除：只有带 "//" 的绝对地址或已知的
+  // 不透明协议才按原样解析，其余一律补 https:// 再归一化。
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(text) ||
+    /^(about|edge|chrome|devtools|data|javascript|mailto|view-source):/i.test(text);
   try {
-    const parsed = new URL(/^[a-z][a-z0-9+.-]*:/i.test(text) ? text : `https://${text}`);
+    const parsed = new URL(hasScheme ? text : `https://${text}`);
     const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
     const port = parsed.port ? `:${parsed.port}` : '';
     const pathname = (parsed.pathname || '/').replace(/\/{2,}/g, '/').replace(/\/$/, '') || '/';
@@ -137,7 +142,14 @@ class EdgeUiaMonitor extends EventEmitter {
     });
     child.on('error', (error) => {
       this.logger('warn', 'Windows UI Automation 监视器启动失败', { error: error.message });
+      if (this.child === child) this.child = null;
       this.publishStatus({ available: false, running: false, reason: 'spawn-error', error: error.message });
+      // spawn 失败（如 ENOENT）只触发 'error'/'close'，不会触发 'exit'；
+      // 这里也要安排自动重启，否则监视器会一直停在 spawn-error 状态。
+      if (!this.stopped && !this.restartTimer) {
+        this.restartTimer = setTimeout(() => this.start(), this.restartMs);
+        this.restartTimer.unref?.();
+      }
     });
     child.on('exit', (code, signal) => {
       if (this.child === child) this.child = null;
@@ -150,7 +162,7 @@ class EdgeUiaMonitor extends EventEmitter {
         signal: signal || null,
         error: error || null
       });
-      if (!this.stopped) {
+      if (!this.stopped && !this.restartTimer) {
         this.restartTimer = setTimeout(() => this.start(), this.restartMs);
         this.restartTimer.unref?.();
       }

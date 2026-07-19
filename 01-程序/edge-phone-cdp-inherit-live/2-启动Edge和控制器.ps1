@@ -30,8 +30,9 @@ function Stop-OldControllerOnPort {
             ($CommandLine.IndexOf($Here, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $CommandLine -match '(?i)edge-phone-cdp')
         $HealthMatches = $false
         try {
+            # /health 有意不返回 pid；能在该端口用本服务名应答的监听进程就是控制器。
             $Health = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 2
-            $HealthMatches = $Health.ok -eq $true -and $Health.service -eq 'edge-phone-cdp-controller' -and [int]$Health.pid -eq [int]$Connection.OwningProcess
+            $HealthMatches = $Health.ok -eq $true -and $Health.service -eq 'edge-phone-cdp-controller'
         } catch {}
         $IsThisController = $IsNodeServer -or $HealthMatches
         if ($IsThisController) {
@@ -142,7 +143,10 @@ if ($CloseExistingEdge) {
             Start-Sleep -Milliseconds 250
         }
         if (Get-Process msedge -ErrorAction SilentlyContinue) {
-            & taskkill.exe /IM msedge.exe /F 2>$null | Out-Null
+            # Windows PowerShell 5.1 在 $ErrorActionPreference='Stop' 下会把原生命令
+            # 的 stderr 重定向（2>$null）当成终止性错误，taskkill 输出"没有找到进程/
+            # 拒绝访问"会让整个启动脚本中断。改用 Stop-Process 并明确忽略失败。
+            Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue
         }
     }
     Start-Sleep -Milliseconds 700

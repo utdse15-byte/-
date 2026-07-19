@@ -58,14 +58,16 @@ jobs:
         timeout-minutes: 15
         run: npm test
       - name: Parse UIA helper with real PowerShell
-        shell: pwsh
+        # 用户真机通过 powershell.exe（Windows PowerShell 5.1）运行这些脚本，
+        # 必须用 5.1 的解析器做门禁；pwsh 7 会放过 5.1 不支持的语法（?? 、三元等）。
+        shell: powershell
         run: |
           $tokens = $null; $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'helpers/edge-uia-monitor.ps1').Path, [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
           Write-Host 'UIA helper parsed cleanly by Windows PowerShell.'
       - name: Parse launcher/installer scripts
-        shell: pwsh
+        shell: powershell
         run: |
           $failed = $false
           Get-ChildItem -Filter *.ps1 | ForEach-Object {

@@ -409,6 +409,7 @@
     displayedViewportRevision: 0,
     viewportRevisionCounter: 0,
     viewportSyncPending: false,
+    viewportSyncWatchdogTimer: null,
     viewportSyncReason: '',
     viewportSettleGeneration: 0,
     viewportSettleTimer: null,
@@ -593,11 +594,25 @@
     state.connectionStartedAt = Date.now();
 
     const isCurrent = () => ws === state.ws && generation === state.connectionGeneration;
+    let opened = false;
 
     ws.onopen = () => {
       if (!isCurrent()) return;
+      opened = true;
       state.connected = true;
       state.firstConnectAt = Date.now();
+      // 服务端的 epoch/sequence 计数在控制器重启后会从头开始。这里必须
+      // 重置单调递增的排序门槛，否则重启后的所有帧都会因"过旧"被丢弃，
+      // 画面永久停在重启前的一帧。保留 currentFrame 本身（旧画面继续显示）。
+      state.expectedFrameEpoch = 0;
+      state.displayedFrameEpoch = 0;
+      state.lastRenderedSequence = 0;
+      state.lastServerSequence = 0;
+      state.lastStreamFrameSequence = 0;
+      state.lastDisplayedTimestamp = 0;
+      state.lastDisplayedTargetId = null;
+      state.frameTransitionReason = '';
+      state.frameTransitionAt = 0;
       state.reconnectAttempt = 0;
       state.reconnectDueAt = 0;
       setOverlay('tokenOverlay', false);
@@ -641,7 +656,9 @@
         showEmpty('手机与电脑连接断开', navigator.onLine ? '正在自动重连。' : '手机当前离线。', true);
       }
       if (!state.manualDisconnect) {
-        if (!state.firstConnectAt || Date.now() - state.firstConnectAt < 2500) {
+        // 本次连接从未成功打开（例如令牌已被轮换、握手 401）时必须先校验
+        // 令牌，否则会带着失效令牌无限重连，永远不再弹出令牌输入框。
+        if (!opened || !state.firstConnectAt || Date.now() - state.firstConnectAt < 2500) {
           verifyStoredToken().then((valid) => { if (valid) scheduleReconnect(); });
         } else {
           scheduleReconnect();
@@ -1207,6 +1224,15 @@
     if (!state.rendering) processFrameQueue();
   }
 
+  // 以新的布局/渲染器重画当前帧。已有排队帧（必然比 currentFrame 新）时
+  // 不覆盖它——直接渲染排队帧同样能达到重画目的；覆盖会让那帧永远得不到
+  // frameAck，服务端要等满 700ms 超时才继续发帧，并误判为网络拥塞。
+  function requeueCurrentFrame() {
+    if (!state.currentFrame) return;
+    if (!state.queuedFrame) state.queuedFrame = state.currentFrame;
+    if (!state.rendering) processFrameQueue();
+  }
+
   async function processFrameQueue() {
     if (state.rendering) return;
     state.rendering = true;
@@ -1362,6 +1388,8 @@
         if (state.viewportSyncPending && renderedViewportRevision >= state.requestedViewportRevision) {
           state.viewportSyncPending = false;
           state.viewportSyncReason = '';
+          clearTimeout(state.viewportSyncWatchdogTimer);
+          state.viewportSyncWatchdogTimer = null;
         }
         completeFrameTransition(Number(frame.metadata.epoch) || 0);
         if (frame.metadata.targetId) state.activeTabId = frame.metadata.targetId;
@@ -1702,6 +1730,16 @@
     state.requestedViewportRevision = revision;
     state.viewportSyncPending = true;
     state.viewportSyncReason = reason;
+    // viewport 消息没有应答：如果服务端当时恰好无法应用（Edge 正在重启），
+    // 同步标志会永远挂起——所有旧修订号的帧被丢弃、触摸被拒绝。看门狗在
+    // 超时后解除挂起并重发一次视口，避免永久卡在"尺寸同步中"。
+    clearTimeout(state.viewportSyncWatchdogTimer);
+    state.viewportSyncWatchdogTimer = setTimeout(() => {
+      state.viewportSyncWatchdogTimer = null;
+      if (!state.viewportSyncPending) return;
+      state.viewportSyncPending = false;
+      if (wsIsOpen()) sendViewport(true, 'viewport-retry');
+    }, 4000);
     state.lastSentViewport = { ...next, revision };
     state.viewport = { ...state.viewport, ...next, revision };
     send({ type: 'viewport', ...next, revision, force: Boolean(force), reason });
@@ -1746,10 +1784,7 @@
       if (stableSamples >= 3 || elapsed >= 1450) {
         state.resizeSettling = false;
         sendViewport(true, reason);
-        if (state.currentFrame && !state.gesture) {
-          state.queuedFrame = state.currentFrame;
-          if (!state.rendering) processFrameQueue();
-        }
+        if (!state.gesture) requeueCurrentFrame();
         markVisualDemand(reason, 1350);
         if (fallback) {
           state.viewportFallbackTimer = setTimeout(() => {
@@ -2483,6 +2518,12 @@
     if (state.wheelAnimationFrame) cancelAnimationFrame(state.wheelAnimationFrame);
     state.moveAnimationFrame = 0;
     state.wheelAnimationFrame = 0;
+    // 手势期间被推迟的视口同步不能只依赖 finishGesture 来补发；手势被取消
+    // （切后台、导航切换等）时同样要补发，否则 Edge 视口会一直不匹配。
+    if (state.deferredViewport) {
+      state.deferredViewport = false;
+      if (!state.resizeSettling) scheduleViewport(false);
+    }
   }
 
   function navigateAddress(value) {
@@ -3877,10 +3918,7 @@
       state.canvasFailures = 0;
       state.imageFailures = 0;
       state.rendererActive = 'none';
-      if (state.currentFrame) {
-        state.queuedFrame = state.currentFrame;
-        processFrameQueue();
-      }
+      requeueCurrentFrame();
     });
     elements.gestureModeSelect.value = state.gestureMode;
     elements.gestureModeSelect.addEventListener('change', () => {
@@ -4140,10 +4178,7 @@
           scheduleViewport(false, false, 'stage-resize');
           scheduleStableHeightViewportSync();
         }
-        if (state.currentFrame && !state.gesture) {
-          state.queuedFrame = state.currentFrame;
-          if (!state.rendering) processFrameQueue();
-        }
+        if (!state.gesture) requeueCurrentFrame();
       }, 90);
     };
     if (typeof ResizeObserver === 'function') {
