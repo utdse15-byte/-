@@ -217,6 +217,11 @@ async function main() {
   await new Promise((resolve) => mock.once('listening', resolve));
 
   const token = 'integration-test-token-123456';
+  // Windows 上 os.tmpdir() 可能是 8.3 短路径，服务端会规范化为长路径；
+  // 路径相等断言前统一 realpath 展开。
+  const canonicalPath = (value) => {
+    try { return fs.realpathSync.native(value); } catch { return path.resolve(value); }
+  };
   const computerTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'edge-phone-computer-pick-'));
   const computerTempFile = path.join(computerTempDir, '电脑文件测试.txt');
   fs.writeFileSync(computerTempFile, 'computer-file');
@@ -434,7 +439,7 @@ async function main() {
     assert.strictEqual(computerReply.ok, true);
     assert.strictEqual(computerReply.result.count, 1);
     const computerSetCommand = observedMessages.filter((item) => item.method === 'DOM.setFileInputFiles').at(-1);
-    assert.strictEqual(path.resolve(computerSetCommand.params.files[0]), path.resolve(computerTempFile));
+    assert.strictEqual(canonicalPath(computerSetCommand.params.files[0]), canonicalPath(computerTempFile));
 
     const chooserCountAfterCommit = texts.filter((item) => item.type === 'fileChooser').length;
     mockBrowserSocket.send(JSON.stringify({
