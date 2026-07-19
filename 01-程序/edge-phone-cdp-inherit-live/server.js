@@ -308,7 +308,17 @@ function resolveAccessToken() {
   }
   return generated;
 }
-const ACCESS_TOKEN = resolveAccessToken();
+let ACCESS_TOKEN = resolveAccessToken();
+// 由 PHONE_TOKEN / config.accessToken 明确固定的令牌不允许在线轮换；
+// 只有自动生成并存放在 data/access-token.txt 的令牌可以轮换。
+const ACCESS_TOKEN_PINNED = Boolean(String(process.env.PHONE_TOKEN || fileConfig.accessToken || '').trim());
+function rotateAccessToken() {
+  if (ACCESS_TOKEN_PINNED) throw new Error('访问令牌由配置或环境变量固定，无法在线轮换；请在配置中修改。');
+  const generated = crypto.randomBytes(18).toString('base64url');
+  fs.writeFileSync(TOKEN_PATH, `${generated}\r\n`, { encoding: 'utf8', mode: 0o600 });
+  ACCESS_TOKEN = generated;
+  return generated;
+}
 
 fs.mkdirSync(LOG_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_ROOT, { recursive: true });
@@ -772,6 +782,12 @@ class ClientHub {
 
   broadcastJson(payload) {
     for (const state of this.clients.values()) sendJson(state.ws, payload);
+  }
+
+  broadcastJsonExcept(exceptWs, payload) {
+    for (const state of this.clients.values()) {
+      if (state.ws !== exceptWs) sendJson(state.ws, payload);
+    }
   }
 
   queueFrame(frame, onlyWs = null) {
@@ -4044,7 +4060,28 @@ const mimeTypes = {
   '.jpeg': 'image/jpeg'
 };
 
+const WS_TOKEN_PROTOCOL_PREFIX = 'epc.token.';
+const WS_ACK_PROTOCOL = 'epc.v1';
+
+// 浏览器无法为 WebSocket 设置 Authorization 头，因此手机页把令牌放在
+// Sec-WebSocket-Protocol 子协议里（base64url 编码），令牌不再出现在 URL 中，
+// 也就不会进入访问日志、浏览器历史或 Referer。仍保留 ?token= 和 Bearer 作为
+// 兼容回退（HTTP API、旧客户端与测试）。
+function tokenFromWebSocketProtocol(req) {
+  const header = String(req.headers['sec-websocket-protocol'] || '');
+  if (!header) return '';
+  for (const raw of header.split(',')) {
+    const item = raw.trim();
+    if (item.startsWith(WS_TOKEN_PROTOCOL_PREFIX)) {
+      try { return Buffer.from(item.slice(WS_TOKEN_PROTOCOL_PREFIX.length), 'base64url').toString('utf8'); } catch { return ''; }
+    }
+  }
+  return '';
+}
+
 function tokenFromRequest(requestUrl, req) {
+  const protoToken = tokenFromWebSocketProtocol(req);
+  if (protoToken) return protoToken;
   const queryToken = requestUrl.searchParams.get('token');
   if (queryToken) return queryToken;
   const auth = String(req.headers.authorization || '');
@@ -4131,21 +4168,14 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (requestUrl.pathname === '/health') {
+    // /health 无需令牌，因此只返回存活性所需的最小字段。进程 PID、连接数、
+    // Edge 进程与重启状态、重连计时等运行拓扑信息移到令牌保护的 /api/status，
+    // 避免未认证方探测本机状态。
     sendJsonResponse(res, 200, {
       ok: true,
       service: SERVICE_ID,
       version: VERSION,
-      pid: process.pid,
-      uptimeSeconds: Math.round(process.uptime()),
-      cdpConnected: cdp.isOpen(),
-      frameAvailable: Boolean(cdp.latestFrame),
-      frameAgeMs: cdp.lastAnyFrameAt ? Date.now() - cdp.lastAnyFrameAt : null,
-      connectedPhones: hub.size,
-      edgeManaged: EDGE_MANAGED_SESSION,
-      edgeProcessRunning: edgeRuntime.cachedProcessRunning,
-      edgeAutoRestart: EDGE_AUTO_RESTART,
-      edgeRestartCount: edgeRuntime.launchCount,
-      reconnectDueInMs: cdp.reconnectDueAt ? Math.max(0, cdp.reconnectDueAt - Date.now()) : null
+      uptimeSeconds: Math.round(process.uptime())
     });
     return;
   }
@@ -4219,7 +4249,9 @@ const wss = new WebSocketServer({
   noServer: true,
   perMessageDeflate: false,
   maxPayload: 1024 * 1024,
-  clientTracking: false
+  clientTracking: false,
+  // 只回选非机密的 epc.v1 应答子协议，令牌子协议永不出现在响应头里。
+  handleProtocols: (protocols) => (protocols.has(WS_ACK_PROTOCOL) ? WS_ACK_PROTOCOL : false)
 });
 
 const authFailures = new Map();
@@ -4273,7 +4305,7 @@ const controllerOnlyTypes = new Set([
   'viewport', 'navigate', 'back', 'forward', 'reload', 'touch', 'tap', 'wheel', 'text', 'key', 'selectAll',
   'mobile', 'streamPreset', 'followDesktopTabs', 'manualCompatibility', 'strictNativeTouch', 'manualCompatibilityAudit', 'selectTarget', 'newTab', 'closeTab', 'navigateHistoryEntry', 'dialog', 'recoverFrame', 'frameQuality', 'frameProblem', 'calibrationMarker', 'calibrationProbe',
   'requestUpload', 'cancelUpload', 'computerRoots', 'computerList', 'computerCommit', 'uploadBegin', 'uploadFileBegin', 'uploadChunkAck', 'uploadFileEnd', 'uploadCommit',
-  'clipboardGet', 'clipboardSet', 'dedicatedWindow'
+  'clipboardGet', 'clipboardSet', 'dedicatedWindow', 'rotateToken'
 ]);
 
 function reply(ws, requestId, result = {}) {
@@ -4310,6 +4342,7 @@ wss.on('connection', (ws, req, info) => {
       computerFilePicker: true,
       clipboardBridge: CLIPBOARD_BRIDGE_ENABLED && clipboardBridge.available(),
       clipboardMaxChars: CLIPBOARD_MAX_CHARS,
+      tokenRotatable: !ACCESS_TOKEN_PINNED,
       dedicatedWindow: cdp.dedicatedWindowPayload(),
       uploadAckBytes: UPLOAD_ACK_BYTES,
       desktopWidth: DEFAULT_DESKTOP_WIDTH,
@@ -4413,6 +4446,16 @@ wss.on('connection', (ws, req, info) => {
         const result = await clipboardBridge.write(message.text);
         log('info', '用户写入电脑剪贴板', { chars: result.chars });
         reply(ws, requestId, { chars: result.chars });
+        return;
+      }
+      if (message.type === 'rotateToken') {
+        // 令牌轮换只能由已认证的控制端手机触发。轮换后当前连接仍有效（本次
+        // 连接已通过认证），把新令牌回给发起方以便更新并重连；其他旧令牌立即失效。
+        const rotated = rotateAccessToken();
+        log('warn', '用户轮换了访问令牌', { pinned: false });
+        printAccessUrls('令牌已轮换，请在手机上使用新地址：');
+        reply(ws, requestId, { token: rotated });
+        hub.broadcastJsonExcept(ws, { type: 'status', level: 'warn', message: '访问令牌已在电脑上轮换，请用新链接重新连接。' });
         return;
       }
       if (message.type === 'browserHistory') {
@@ -4834,21 +4877,25 @@ function ipv4Addresses() {
   );
 }
 
-server.listen(HTTP_PORT, LISTEN_HOST, () => {
+function printAccessUrls(heading = ' 手机打开以下地址之一：') {
   console.log('');
-  console.log('============================================================');
-  console.log(` Edge 手机 CDP 控制器 v${VERSION} 已启动`);
-  console.log(` 监听地址：${LISTEN_HOST}:${HTTP_PORT}`);
   console.log(` 访问令牌：${ACCESS_TOKEN}`);
-  console.log(` 令牌文件：${TOKEN_PATH}`);
-  console.log('');
-  console.log(' 手机打开以下地址之一：');
+  console.log(heading);
   const addresses = ipv4Addresses();
   if (!addresses.length) console.log(` http://电脑IP:${HTTP_PORT}/#token=${encodeURIComponent(ACCESS_TOKEN)}`);
   for (const item of addresses) {
     console.log(` http://${item.address}:${HTTP_PORT}/#token=${encodeURIComponent(ACCESS_TOKEN)}  [${item.name}${item.virtual ? '，虚拟网卡候选' : item.privateAddress ? '' : '，非私网地址'}]`);
   }
   console.log('');
+}
+
+server.listen(HTTP_PORT, LISTEN_HOST, () => {
+  console.log('');
+  console.log('============================================================');
+  console.log(` Edge 手机 CDP 控制器 v${VERSION} 已启动`);
+  console.log(` 监听地址：${LISTEN_HOST}:${HTTP_PORT}`);
+  console.log(` 令牌文件：${TOKEN_PATH}`);
+  printAccessUrls();
   console.log(` 本机健康检查：http://127.0.0.1:${HTTP_PORT}/health`);
   console.log(` 日志文件：${LOG_PATH}`);
   console.log(' 不要开放或转发 Edge 调试端口到公网。');

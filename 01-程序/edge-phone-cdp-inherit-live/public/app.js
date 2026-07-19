@@ -536,7 +536,22 @@
 
   function socketUrl() {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${protocol}//${location.host}/control?token=${encodeURIComponent(state.token)}&clientId=${encodeURIComponent(state.clientId)}`;
+    // 令牌通过 Sec-WebSocket-Protocol 子协议传递，不再放进 URL，避免出现在
+    // 访问日志、浏览器历史或 Referer 里。clientId 仍在查询串（非机密）。
+    return `${protocol}//${location.host}/control?clientId=${encodeURIComponent(state.clientId)}`;
+  }
+
+  function tokenToBase64Url(token) {
+    // 把令牌编成 base64url，使其成为合法的 WebSocket 子协议名（仅 A-Za-z0-9-_）。
+    const utf8 = new TextEncoder().encode(String(token || ''));
+    let binary = '';
+    for (const byte of utf8) binary += String.fromCharCode(byte);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  function socketProtocols() {
+    // 第一个是非机密应答子协议（服务端回选它），第二个携带 base64url 令牌。
+    return ['epc.v1', `epc.token.${tokenToBase64Url(state.token)}`];
   }
 
   function connect(force = false) {
@@ -572,7 +587,7 @@
     }
     elements.roleBadge.textContent = '连接中';
     elements.roleBadge.className = '';
-    const ws = new WebSocket(socketUrl());
+    const ws = new WebSocket(socketUrl(), socketProtocols());
     ws.binaryType = 'arraybuffer';
     state.ws = ws;
     state.connectionStartedAt = Date.now();
@@ -980,6 +995,9 @@
           if (message.limits.desktopTabFollow) ingestDesktopTabFollow(message.limits.desktopTabFollow);
           if (message.limits.manualCompatibility) ingestManualCompatibility(message.limits.manualCompatibility);
           $('clipboardBridgeButton').hidden = !message.limits.clipboardBridge;
+          $('fsClipboardButton').hidden = !message.limits.clipboardBridge;
+          $('rotateTokenButton').hidden = !message.limits.tokenRotatable;
+          $('tokenRotateHint').hidden = !message.limits.tokenRotatable;
           if (message.limits.dedicatedWindow) updateDedicatedWindowUi(message.limits.dedicatedWindow);
         }
         syncAdvancedControls();
@@ -3833,6 +3851,7 @@
     elements.fsReloadButton.addEventListener('click', () => { $('reloadButton').click(); scheduleFullscreenDockCollapse(); });
     elements.fsTabsButton.addEventListener('click', () => { $('tabsButton').click(); closeFullscreenDock(true); });
     elements.fsKeyboardButton.addEventListener('click', () => { $('keyboardButton').click(); closeFullscreenDock(true); });
+    $('fsClipboardButton').addEventListener('click', () => { setOverlay('clipboardOverlay', true); closeFullscreenDock(true); });
     elements.fsUploadButton.addEventListener('click', () => { $('uploadButton').click(); closeFullscreenDock(true); });
     elements.fsStrictInputButton.addEventListener('click', () => { toggleStrictNativeTouch().finally(() => scheduleFullscreenDockCollapse()); });
     elements.fsCalibrationButton.addEventListener('click', openFullscreenCalibrationPanel);
@@ -4015,6 +4034,21 @@
       setOverlay('tokenOverlay', true);
       elements.tokenInput.value = '';
       elements.tokenInput.focus();
+    });
+
+    $('rotateTokenButton').addEventListener('click', async () => {
+      if (!globalThis.confirm?.('轮换后旧令牌立即失效，其他设备需用新链接重新连接。确定吗？')) return;
+      try {
+        const result = await request('rotateToken', {}, 20000);
+        const newToken = String(result?.token || '');
+        if (!newToken) throw new Error('未收到新令牌');
+        state.token = newToken;
+        storageSet('edgePhoneTokenV6', newToken);
+        showToast('令牌已轮换，正在用新令牌重连。', 'ok', 2600);
+        connect(true);
+      } catch (error) {
+        showToast(`轮换令牌失败：${error.message}`, 'error', 4000);
+      }
     });
 
     $('saveTokenButton').addEventListener('click', () => {

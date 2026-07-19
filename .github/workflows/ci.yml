@@ -18,8 +18,8 @@ jobs:
     name: Ubuntu (check + tests + real Chromium)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
       - name: Install Chromium
@@ -44,8 +44,8 @@ jobs:
     name: Windows (Edge + real PowerShell + clipboard)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
       - name: Install dependencies
@@ -75,19 +75,30 @@ jobs:
           }
           if ($failed) { exit 1 }
           Write-Host 'All PowerShell scripts parsed cleanly.'
-      - name: Microsoft Edge present
+      - name: Resolve Microsoft Edge
+        id: edge
         shell: pwsh
         run: |
-          $edge = Get-Command msedge -ErrorAction SilentlyContinue
+          $candidates = @(
+            "$Env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+            "${Env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+          )
+          $edge = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $edge) {
-            $candidates = @(
-              "$Env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
-              "${Env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
-            )
-            $edge = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+            $cmd = Get-Command msedge -ErrorAction SilentlyContinue
+            if ($cmd) { $edge = $cmd.Source }
           }
           if (-not $edge) { Write-Error 'Microsoft Edge not found on runner.'; exit 1 }
           Write-Host "Edge present: $edge"
+          "edge-path=$edge" | Out-File -FilePath $Env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Real Microsoft Edge CDP integration
+        # 关键：windows-latest 自带真实 Microsoft Edge，而 Edge 就是 Chromium 内核。
+        # 把真实 CDP 集成测试指向 msedge.exe，等于对“实际受控浏览器”的 CDP 行为
+        # 做每次提交自动验证，把大量“需 Windows Edge 验证”欠账变成回归测试。
+        env:
+          CHROMIUM_PATH: ${{ steps.edge.outputs.edge-path }}
+        timeout-minutes: 15
+        run: npm run test:real
       - name: Clipboard bridge round-trip (real Get/Set-Clipboard)
         shell: pwsh
         continue-on-error: true

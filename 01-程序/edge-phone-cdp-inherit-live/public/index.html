@@ -92,6 +92,7 @@
         <button id="fsReloadButton" type="button"><span>↻</span><small>刷新</small></button>
         <button id="fsTabsButton" type="button"><span>▣</span><small>标签</small></button>
         <button id="fsKeyboardButton" type="button"><span>⌨</span><small>输入</small></button>
+        <button id="fsClipboardButton" type="button" hidden><span>📋</span><small>剪贴板</small></button>
         <button id="fsUploadButton" type="button"><span>↑</span><small>上传</small></button>
         <button id="fsStrictInputButton" type="button" hidden><span>🖱</span><small>鼠标</small></button>
         <button id="fsCalibrationButton" type="button"><span>◎</span><small>校准</small></button>
@@ -390,7 +391,11 @@
       <div class="settings-group danger-zone">
         <h3>访问令牌</h3>
         <p>令牌保存在当前手机浏览器中。清除后需要重新输入 PowerShell 窗口显示的令牌。</p>
-        <button id="clearTokenButton" class="danger" type="button">清除令牌并重新登录</button>
+        <div class="button-row">
+          <button id="rotateTokenButton" type="button" hidden>轮换访问令牌</button>
+          <button id="clearTokenButton" class="danger" type="button">清除令牌并重新登录</button>
+        </div>
+        <p id="tokenRotateHint" class="settings-note" hidden>轮换会立即作废旧令牌；本机会用新令牌自动重连，其他设备需用新链接重新连接。</p>
       </div>
     </section>
   </div>

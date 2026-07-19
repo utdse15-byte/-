@@ -408,6 +408,18 @@ requirements:
   text: 控制器端口只允许 LocalSubnet，使用令牌/会话；不得映射到公网。
   implementation: 已实现/需 Windows 验证
   evidence: LocalSubnet 防火墙脚本、令牌和同源检查
+- id: SEC-003
+  level: MUST
+  category: 令牌不入URL
+  text: 手机 WebSocket 认证通过 Sec-WebSocket-Protocol 子协议携带令牌（base64url），令牌不得出现在 URL、访问日志、浏览器历史或 Referer；服务端只回选非机密应答子协议，不回显令牌。/health 无令牌可访问但只返回存活性最小字段。
+  implementation: 已实现
+  evidence: tokenFromWebSocketProtocol + handleProtocols(epc.v1)；app.js socketProtocols；test/ws-auth.test.js
+- id: SEC-004
+  level: MUST
+  category: 令牌可轮换
+  text: 自动生成并存于 data/access-token.txt 的令牌必须支持由已认证控制端一键在线轮换；由环境变量或配置固定的令牌不可轮换，必须明确拒绝。
+  implementation: 已实现
+  evidence: rotateAccessToken + WS rotateToken 命令；ACCESS_TOKEN_PINNED 拒绝；hello.tokenRotatable
 - id: PRIV-001
   level: MUST
   category: 最少持久化

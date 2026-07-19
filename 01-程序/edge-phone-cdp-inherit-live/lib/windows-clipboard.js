@@ -25,6 +25,14 @@ function runCommand(command, { input = null, timeoutMs = DEFAULT_TIMEOUT_MS, max
       encoding: 'buffer'
     }, (error, stdout, stderr) => {
       if (error) {
+        if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+          reject(new Error('电脑剪贴板内容过大，超过控制器允许的上限；请在电脑上分段复制。'));
+          return;
+        }
+        if (error.killed || error.signal === 'SIGTERM') {
+          reject(new Error('读取电脑剪贴板超时；请确认 Windows PowerShell 可用后重试。'));
+          return;
+        }
         const detail = Buffer.isBuffer(stderr) ? stderr.toString('utf8').trim() : '';
         reject(new Error(detail || error.message));
         return;
