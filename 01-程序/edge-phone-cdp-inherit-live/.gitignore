@@ -1,0 +1,6 @@
+node_modules/
+logs/*.log
+data/access-token.txt
+data/history-snapshots/
+diagnostics/
+test/fixtures/ui-preview.png

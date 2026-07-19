@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover,interactive-widget=resizes-content">
+  <meta name="theme-color" content="#0b1220">
+  <meta name="color-scheme" content="dark">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <title>Edge 手机控制器</title>
+</head>
+<body>
+  <div id="app">
+    <header id="browserChrome">
+      <div class="nav-row">
+        <button id="backButton" class="icon-button" type="button" aria-label="后退" disabled>←</button>
+        <button id="forwardButton" class="icon-button" type="button" aria-label="前进" disabled>→</button>
+        <form id="addressForm" autocomplete="off">
+          <input id="addressInput" type="text" inputmode="url" enterkeyhint="go" autocapitalize="off" autocomplete="off" spellcheck="false" aria-label="网址或搜索词" placeholder="网址或搜索词">
+          <button id="goButton" type="submit">前往</button>
+        </form>
+      </div>
+      <div class="tool-row" aria-label="浏览器工具">
+        <button id="reloadButton" type="button"><span aria-hidden="true">↻</span><small>刷新</small></button>
+        <button id="tabsButton" type="button"><span id="tabCount" aria-hidden="true">▣</span><small>标签</small></button>
+        <button id="keyboardButton" type="button"><span aria-hidden="true">⌨</span><small>输入</small></button>
+        <button id="uploadButton" type="button"><span aria-hidden="true">↑</span><small>上传</small></button>
+        <button id="displayButton" type="button"><span aria-hidden="true">▯</span><small id="displayLabel">手机</small></button>
+        <button id="settingsButton" type="button"><span aria-hidden="true">⚙</span><small>设置</small></button>
+      </div>
+      <div id="topBadges" class="status-row" aria-live="polite">
+        <button id="roleBadge" type="button" title="控制权状态">连接中</button>
+        <span id="compatibilityBadge" class="compatibility-badge" hidden>严格人工模式</span>
+        <span id="frameBadge">无画面</span>
+      </div>
+    </header>
+
+    <main id="stage" aria-label="Windows Edge 网页画面">
+      <canvas id="screenCanvas"></canvas>
+      <img id="screenImage" class="screen-image-layer" alt="Windows Edge 网页画面" draggable="false" decoding="async">
+      <img id="screenImageBuffer" class="screen-image-layer" alt="" aria-hidden="true" draggable="false" decoding="async">
+      <div id="tapMarker" aria-hidden="true"></div>
+      <div id="calibrationLocalMarker" aria-hidden="true" hidden><span>手指</span></div>
+      <div id="calibrationTargetMarker" class="calibration-red-marker" aria-hidden="true" hidden><span>目标</span></div>
+      <div id="calibrationRemoteMarker" class="calibration-red-marker" aria-hidden="true" hidden><span>Edge</span></div>
+      <div id="emptyState">
+        <div class="spinner" aria-hidden="true"></div>
+        <strong id="emptyTitle">正在连接 Windows Edge</strong>
+        <p id="emptyDetail">画面会在连接后自动出现。</p>
+        <div class="empty-actions">
+          <button id="emptyRecoverButton" type="button">重新获取画面</button>
+          <button id="emptyDiagnosticsButton" type="button">查看诊断</button>
+        </div>
+      </div>
+      <div id="calibrationGuide" hidden>
+        <span id="calibrationGuideText">自动校准准备中…</span>
+        <button id="cancelCalibrationButton" type="button">取消</button>
+      </div>
+      <div id="toast" role="status" aria-live="polite"></div>
+    </main>
+
+    <section id="keyboardPanel" aria-label="远程输入">
+      <div class="keyboard-input-row">
+        <textarea id="textInput" rows="2" enterkeyhint="send" autocomplete="off" autocapitalize="off" placeholder="先点远程网页输入框，再在这里输入；支持中文输入法"></textarea>
+        <button id="sendTextButton" class="primary" type="button">发送</button>
+      </div>
+      <div class="key-grid">
+        <button type="button" data-key="Backspace">退格</button>
+        <button type="button" data-key="Enter">回车</button>
+        <button type="button" data-key="Tab">Tab</button>
+        <button type="button" data-key="Escape">Esc</button>
+        <button type="button" data-key="ArrowLeft">←</button>
+        <button type="button" data-key="ArrowUp">↑</button>
+        <button type="button" data-key="ArrowDown">↓</button>
+        <button type="button" data-key="ArrowRight">→</button>
+        <button id="selectAllButton" type="button">全选</button>
+        <button id="pasteButton" type="button">粘贴</button>
+        <button id="clipboardBridgeButton" type="button" hidden>电脑剪贴板</button>
+        <button id="hideKeyboardButton" class="wide" type="button">收起输入面板</button>
+      </div>
+    </section>
+
+    <aside id="fullscreenDock" aria-label="全屏快捷控制">
+      <button id="fullscreenDockHandle" type="button" aria-expanded="false" aria-controls="fullscreenDockPanel" title="全屏快捷控制">⋮</button>
+      <div id="fullscreenDockPanel" class="fullscreen-dock-panel" hidden>
+        <button id="fsBackButton" type="button"><span>←</span><small>后退</small></button>
+        <button id="fsForwardButton" type="button"><span>→</span><small>前进</small></button>
+        <button id="fsReloadButton" type="button"><span>↻</span><small>刷新</small></button>
+        <button id="fsTabsButton" type="button"><span>▣</span><small>标签</small></button>
+        <button id="fsKeyboardButton" type="button"><span>⌨</span><small>输入</small></button>
+        <button id="fsUploadButton" type="button"><span>↑</span><small>上传</small></button>
+        <button id="fsStrictInputButton" type="button" hidden><span>🖱</span><small>鼠标</small></button>
+        <button id="fsCalibrationButton" type="button"><span>◎</span><small>校准</small></button>
+        <button id="fsSettingsButton" type="button"><span>⚙</span><small>设置</small></button>
+        <button id="fsExitButton" type="button"><span>×</span><small>退出全屏</small></button>
+      </div>
+      <div id="fullscreenCalibrationPanel" class="fullscreen-calibration-panel" hidden>
+        <div class="fullscreen-calibration-heading">
+          <div><small>当前配置</small><strong id="fsCalibrationProfileLabel">全屏 · 竖屏</strong></div>
+          <button id="fsCalibrationCloseButton" type="button" aria-label="关闭全屏校准">×</button>
+        </div>
+        <div class="fullscreen-calibration-values"><span>左右 <output id="fsOffsetXValue">0.0%</output></span><span>上下 <output id="fsOffsetYValue">0.0%</output></span></div>
+        <div class="calibration-nudge-grid compact" aria-label="全屏命中点方向微调">
+          <span></span><button type="button" data-calibration-nudge="0,-1">↑</button><span></span>
+          <button type="button" data-calibration-nudge="-1,0">←</button><button id="fsCalibrationTestButton" type="button">测试</button><button type="button" data-calibration-nudge="1,0">→</button>
+          <span></span><button type="button" data-calibration-nudge="0,1">↓</button><span></span>
+        </div>
+        <label>步长 <select id="fsCalibrationStepSelect"><option value="0.1">0.1%</option><option value="0.25" selected>0.25%</option><option value="0.5">0.5%</option><option value="1">1.0%</option></select></label>
+        <div class="fullscreen-calibration-actions">
+          <button id="fsCalibrationCopyButton" type="button">从普通模式复制</button>
+          <button id="fsCalibrationResetButton" type="button">重置当前</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <div id="tabsOverlay" class="overlay" hidden>
+    <section class="sheet tabs-history-sheet" role="dialog" aria-modal="true" aria-labelledby="tabsTitle">
+      <div class="sheet-header">
+        <div><h2 id="tabsTitle">Edge 标签与历史</h2><p>标签页跟随电脑；浏览历史读取当前 Edge 配置的本地历史数据库。</p></div>
+        <button class="close-button" type="button" data-close="tabsOverlay" aria-label="关闭">×</button>
+      </div>
+      <div class="sheet-mode-tabs" role="tablist" aria-label="标签页或浏览历史">
+        <button id="tabsModeButton" class="active" type="button" role="tab" aria-selected="true">标签页</button>
+        <button id="browserHistoryModeButton" type="button" role="tab" aria-selected="false">浏览历史</button>
+      </div>
+
+      <div id="tabsModePane" class="sheet-mode-pane">
+        <div class="new-tab-row">
+          <input id="newTabInput" type="text" inputmode="url" placeholder="新标签页网址或搜索词">
+          <button id="newTabButton" class="primary" type="button">新建</button>
+        </div>
+        <div id="tabsList" class="tabs-list"></div>
+        <section id="historySection" class="history-section" hidden>
+          <div class="subsection-heading">
+            <h3>当前标签页会话历史</h3>
+            <p>这里只是当前标签页的后退、前进记录；完整历史请切换到“浏览历史”。</p>
+          </div>
+          <div id="navigationHistoryList" class="navigation-history-list"></div>
+        </section>
+      </div>
+
+      <div id="browserHistoryPane" class="sheet-mode-pane" hidden>
+        <div class="browser-history-toolbar">
+          <div class="history-search-wrap">
+            <span aria-hidden="true">⌕</span>
+            <input id="browserHistorySearchInput" type="search" autocomplete="off" placeholder="搜索标题或网址">
+          </div>
+          <button id="browserHistoryRefreshButton" type="button">刷新</button>
+        </div>
+        <div id="browserHistoryStatus" class="browser-history-status">打开后读取 Edge 本机浏览历史。</div>
+        <div id="browserHistoryList" class="browser-history-list" aria-live="polite"></div>
+        <button id="browserHistoryMoreButton" class="full-width" type="button" hidden>加载更早记录</button>
+      </div>
+    </section>
+  </div>
+
+  <div id="clipboardOverlay" class="overlay" hidden>
+    <section class="sheet clipboard-sheet" role="dialog" aria-modal="true" aria-labelledby="clipboardTitle">
+      <div class="sheet-header">
+        <div><h2 id="clipboardTitle">电脑剪贴板</h2><p>读取和写入都只在你点击时发生一次；不自动同步，内容不保存、不记录。</p></div>
+        <button class="close-button" type="button" data-close="clipboardOverlay" aria-label="关闭">×</button>
+      </div>
+      <textarea id="clipboardText" rows="9" autocomplete="off" autocapitalize="off" placeholder="点“从电脑读取”取回电脑剪贴板文本；或先把手机内容粘贴到这里，再点“写入电脑”。"></textarea>
+      <div id="clipboardStatus" class="clipboard-status" aria-live="polite">尚未读取。</div>
+      <div class="clipboard-actions">
+        <button id="clipboardReadButton" type="button">从电脑读取</button>
+        <button id="clipboardCopyButton" type="button">复制到手机</button>
+        <button id="clipboardWriteButton" type="button">写入电脑</button>
+      </div>
+    </section>
+  </div>
+
+  <div id="uploadOverlay" class="overlay" hidden>
+    <section class="sheet upload-sheet" role="dialog" aria-modal="true" aria-labelledby="uploadTitle">
+      <div class="sheet-header">
+        <div><h2 id="uploadTitle">选择要交给网页的文件</h2><p id="uploadHint">先在远程网页中点击“选择文件”或“上传”。</p></div>
+        <button class="close-button" type="button" data-close="uploadOverlay" aria-label="关闭">×</button>
+      </div>
+
+      <div class="upload-source-tabs" role="tablist" aria-label="文件来源">
+        <button id="computerSourceButton" class="active" type="button" role="tab" aria-selected="true">电脑文件</button>
+        <button id="phoneSourceButton" type="button" role="tab" aria-selected="false">手机文件</button>
+      </div>
+
+      <div id="computerFilePane" class="upload-source-pane">
+        <div class="computer-browser-toolbar">
+          <button id="computerRootsButton" type="button">位置</button>
+          <button id="computerParentButton" type="button" disabled>上一级</button>
+          <button id="computerRefreshButton" type="button">刷新</button>
+          <button id="computerClearSelectionButton" type="button" disabled>清空选择</button>
+          <label class="computer-sort-label">排序
+            <select id="computerSortSelect" aria-label="电脑文件排序">
+              <option value="modified-desc">更改时间：最新优先</option>
+              <option value="modified-asc">更改时间：最早优先</option>
+              <option value="name-asc">名称：A 到 Z</option>
+              <option value="name-desc">名称：Z 到 A</option>
+              <option value="size-desc">大小：大到小</option>
+              <option value="size-asc">大小：小到大</option>
+            </select>
+          </label>
+        </div>
+        <div id="computerPath" class="computer-path">正在读取电脑文件位置…</div>
+        <div id="computerFileList" class="computer-file-list" aria-live="polite"></div>
+        <button id="computerSelectFolderButton" class="full-width" type="button" hidden>选择当前文件夹</button>
+        <div id="computerSelection" class="computer-selection">尚未选择电脑文件。</div>
+      </div>
+
+      <div id="phoneFilePane" class="upload-source-pane" hidden>
+        <label class="file-picker">
+          <span>选择 Android 手机上的文件</span>
+          <input id="phoneFiles" type="file">
+        </label>
+        <div id="fileList" class="file-list">尚未选择手机文件。</div>
+      </div>
+
+      <progress id="uploadProgress" value="0" max="1" hidden></progress>
+      <p id="uploadStatus" class="status-line"></p>
+      <div class="dialog-actions">
+        <button id="cancelUploadButton" type="button">取消</button>
+        <button id="startUploadButton" class="primary" type="button" disabled>使用已选电脑文件</button>
+      </div>
+    </section>
+  </div>
+
+  <div id="dialogOverlay" class="overlay" hidden>
+    <section class="sheet compact" role="dialog" aria-modal="true" aria-labelledby="dialogTitle">
+      <div class="sheet-header">
+        <div><h2 id="dialogTitle">网页弹窗</h2><p id="dialogMessage"></p></div>
+      </div>
+      <input id="dialogPromptInput" type="text" placeholder="prompt 弹窗的输入内容">
+      <div class="dialog-actions">
+        <button id="dialogCancelButton" class="danger" type="button">取消</button>
+        <button id="dialogAcceptButton" class="primary" type="button">确定</button>
+      </div>
+    </section>
+  </div>
+
+  <div id="settingsOverlay" class="overlay" hidden>
+    <section class="sheet settings-sheet" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <div class="sheet-header sticky">
+        <div><h2 id="settingsTitle">控制与诊断</h2><p>触摸校准、手机/桌面布局、网络画质、连接状态与日志。</p></div>
+        <button class="close-button" type="button" data-close="settingsOverlay" aria-label="关闭">×</button>
+      </div>
+
+      <div class="settings-group compatibility-settings">
+        <h3>严格人工模式（ChatGPT / Claude）</h3>
+        <p>保持原 Windows Edge 配置、User-Agent、平台、扩展和固定代理，不做指纹伪装、不自动发送内容、不抓取回答。默认把手机操作转换为常见桌面鼠标、滚轮和键盘事件；只有你主动切换时才临时启用原生触摸。</p>
+        <label>启用范围
+          <select id="manualCompatibilitySelect">
+            <option value="auto">自动：ChatGPT / Claude 相关域名</option>
+            <option value="always">始终使用严格人工模式</option>
+            <option value="off">关闭，恢复通用手机触摸模式</option>
+          </select>
+        </label>
+        <div id="manualCompatibilityStatus" class="compatibility-status">等待当前标签页状态…</div>
+        <div class="button-row">
+          <button id="strictNativeTouchButton" type="button">临时切换为原生触摸</button>
+          <button id="refreshCompatibilityAuditButton" type="button">按需读取当前环境</button>
+        </div>
+        <p class="settings-note">环境检查只在点按钮时执行一次网页脚本；普通浏览期间不会周期性读取页面环境。原生触摸适合地图、Canvas、滑块和拖拽，使用结束后建议切回鼠标/滚轮。</p>
+        <pre id="compatibilityAuditText" class="compatibility-audit">未读取；仅点击按钮时读取一次。</pre>
+      </div>
+
+      <div class="settings-group calibration-settings" id="calibrationSettingsGroup">
+        <h3>触摸校准</h3>
+        <div class="calibration-profile-row">
+          <div><span>当前校准配置</span><strong id="calibrationProfileLabel">普通模式 · 竖屏</strong></div>
+          <button id="copyCalibrationProfileButton" type="button">复制到全屏</button>
+        </div>
+        <p>先只调“左右/上下命中修正”。网页实际命中点偏左，就点右箭头；偏上，就点下箭头。普通/全屏和横/竖屏分别保存，不会互相破坏。</p>
+
+        <div class="calibration-nudge-card">
+          <div class="calibration-nudge-grid" aria-label="命中点方向微调">
+            <span></span><button type="button" data-calibration-nudge="0,-1" aria-label="命中点向上微调">↑</button><span></span>
+            <button type="button" data-calibration-nudge="-1,0" aria-label="命中点向左微调">←</button>
+            <button id="calibrationCenterButton" type="button" aria-label="开始点击测试">测试</button>
+            <button type="button" data-calibration-nudge="1,0" aria-label="命中点向右微调">→</button>
+            <span></span><button type="button" data-calibration-nudge="0,1" aria-label="命中点向下微调">↓</button><span></span>
+          </div>
+          <label class="calibration-step-setting">每次微调
+            <select id="calibrationStepSelect">
+              <option value="0.1">0.1%（精细）</option>
+              <option value="0.25" selected>0.25%（推荐）</option>
+              <option value="0.5">0.5%</option>
+              <option value="1">1.0%（快速）</option>
+            </select>
+          </label>
+          <div class="calibration-live-values">
+            <span>左右 <output id="offsetXValue">0.0%</output></span>
+            <span>上下 <output id="offsetYValue">0.0%</output></span>
+          </div>
+        </div>
+
+        <label>左右命中修正 <output id="offsetXDirection">不偏</output><input id="offsetXRange" type="range" min="-12" max="12" step="0.1" value="0"></label>
+        <label>上下命中修正 <output id="offsetYDirection">不偏</output><input id="offsetYRange" type="range" min="-12" max="12" step="0.1" value="0"></label>
+
+        <div class="button-grid">
+          <button id="quickCalibrationButton" class="primary" type="button">三点快速校准</button>
+          <button id="calibrationTestButton" type="button">点击测试模式</button>
+          <button id="resetCalibrationButton" type="button">重置当前模式</button>
+          <button id="resetAllCalibrationButton" type="button">重置全部模式</button>
+          <button id="fullscreenButton" type="button">进入沉浸全屏</button>
+        </div>
+
+        <details id="advancedCalibrationDetails" class="advanced-calibration">
+          <summary>边缘误差修正（高级，一般不用动）</summary>
+          <p>只有“中央准确、越靠边越偏”时才调整。100% 表示不改变；小于 100% 会把四周命中点收向中央，大于 100% 会向外展开。</p>
+          <label>左右边缘范围 <output id="scaleXValue">100.0%</output><input id="scaleXRange" type="range" min="90" max="110" step="0.1" value="100"></label>
+          <label>上下边缘范围 <output id="scaleYValue">100.0%</output><input id="scaleYRange" type="range" min="90" max="110" step="0.1" value="100"></label>
+          <button id="autoCalibrationButton" class="full-width" type="button">五点边缘校准（实验）</button>
+        </details>
+      </div>
+
+      <div class="settings-group two-column">
+        <label>画面渲染方式
+          <select id="rendererSelect">
+            <option value="auto">自动（稳定 Canvas）</option>
+            <option value="image">兼容双图层</option>
+            <option value="canvas">稳定 Canvas</option>
+          </select>
+        </label>
+        <label>手势行为
+          <select id="gestureModeSelect">
+            <option value="direct">直接触摸与拖拽（推荐）</option>
+            <option value="smart">智能轻点与滚动</option>
+          </select>
+        </label>
+        <label>触摸注入方式
+          <select id="inputModeSelect">
+            <option value="nativeTouch">原生触摸事件（推荐）</option>
+            <option value="devtools">DevTools 仿真（兼容）</option>
+          </select>
+        </label>
+        <label>网络与画面策略
+          <select id="streamPresetSelect">
+            <option value="auto">自动适应</option>
+            <option value="realtime">实时优先</option>
+            <option value="economy">极省带宽</option>
+            <option value="balanced">均衡</option>
+            <option value="clear">清晰</option>
+          </select>
+        </label>
+        <label class="toggle-setting">跟随电脑当前标签页
+          <span class="toggle-control"><input id="followDesktopTabsToggle" type="checkbox" checked><span>默认开启：使用 Windows UI Automation 读取 Edge 前台标签；切到其他应用时保持当前页，不轮询 ChatGPT/Claude 网页脚本</span></span>
+        </label>
+        <div id="desktopTabFollowStatus" class="settings-note">正在等待 Windows UI Automation 状态…</div>
+        <label class="toggle-setting">手机专用窗口
+          <span class="toggle-control"><input id="dedicatedWindowToggle" type="checkbox"><span>可选：在同一 Edge 配置下新开一个独立窄窗口专供手机操作（登录、Cookie、扩展完全相同），不改动电脑上正在使用的主窗口；标签面板与标签跟随只作用于专用窗口</span></span>
+        </label>
+        <div id="dedicatedWindowStatus" class="settings-note">未启用。</div>
+        <div class="button-row">
+          <button id="closeDedicatedWindowButton" type="button" disabled>关闭专用窗口及其中标签</button>
+        </div>
+        <label>桌面网页宽度 <output id="desktopWidthValue">1280 px</output>
+          <input id="desktopWidthRange" type="range" min="800" max="2560" step="80" value="1280">
+        </label>
+        <label>画面 JPEG 质量 <output id="qualityValue">72</output>
+          <input id="qualityRange" type="range" min="35" max="92" step="1" value="72">
+        </label>
+      </div>
+
+      <div class="settings-group">
+        <h3>画面恢复</h3>
+        <div class="button-grid">
+          <button id="snapshotButton" type="button">立即取一张截图</button>
+          <button id="restartStreamButton" type="button">重启画面通道</button>
+          <button id="syncViewportButton" type="button">重新适配画面尺寸</button>
+          <button id="reconnectButton" type="button">重新连接手机端</button>
+          <button id="claimControlButton" type="button">接管控制</button>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <h3>实时诊断</h3>
+        <pre id="diagnosticsText">正在读取状态…</pre>
+        <div class="button-row"><button id="refreshDiagnosticsButton" type="button">刷新诊断</button><button id="copyDiagnosticsButton" type="button">复制诊断</button></div>
+      </div>
+
+      <div class="settings-group">
+        <h3>最近日志</h3>
+        <pre id="logsText">尚未读取。</pre>
+        <button id="refreshLogsButton" type="button">读取最近日志</button>
+      </div>
+
+      <div class="settings-group danger-zone">
+        <h3>访问令牌</h3>
+        <p>令牌保存在当前手机浏览器中。清除后需要重新输入 PowerShell 窗口显示的令牌。</p>
+        <button id="clearTokenButton" class="danger" type="button">清除令牌并重新登录</button>
+      </div>
+    </section>
+  </div>
+
+  <div id="tokenOverlay" class="overlay" hidden>
+    <section class="sheet compact" role="dialog" aria-modal="true" aria-labelledby="tokenTitle">
+      <div class="sheet-header"><div><h2 id="tokenTitle">输入访问令牌</h2><p>令牌显示在电脑控制器的 PowerShell 窗口中。</p></div></div>
+      <input id="tokenInput" type="password" autocomplete="current-password" placeholder="访问令牌">
+      <button id="saveTokenButton" class="primary full-width" type="button">连接电脑</button>
+      <p id="tokenError" class="error-text"></p>
+    </section>
+  </div>
+
+  <script src="/geometry.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
