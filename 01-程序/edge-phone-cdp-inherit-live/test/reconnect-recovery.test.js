@@ -1,5 +1,7 @@
 'use strict';
 
+const PKG_VERSION = require('../package.json').version;
+
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -191,7 +193,7 @@ async function main() {
     await waitFor(() => binaryFrames > 0 && texts.some((item) => item.type === 'pageState' && item.targetId === 'page-1'), 18000);
     let status = await (await fetch(`http://127.0.0.1:${httpPort}/api/status`, { headers: { Authorization: `Bearer ${token}` } })).json();
     assert.strictEqual(status.cdpConnected, true);
-    assert.strictEqual(status.version, '6.7.0');
+    assert.strictEqual(status.version, PKG_VERSION);
 
     const firstFrameCount = binaryFrames;
     await mock1.close();

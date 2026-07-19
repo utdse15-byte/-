@@ -1,5 +1,7 @@
 'use strict';
 
+const PKG_VERSION = require('../package.json').version;
+
 const assert = require('assert');
 const fs = require('fs');
 const http = require('http');
@@ -664,7 +666,7 @@ async function main() {
       return body.viewport?.streamPreset === 'economy' ? body : null;
     }, 8000, '画面策略状态');
     assert.strictEqual(status.viewport.effectiveStreamPreset, 'economy');
-    assert.strictEqual(status.version, '6.7.0');
+    assert.strictEqual(status.version, PKG_VERSION);
 
     // v6.7 low-interference manual compatibility uses the browser's actual
     // desktop environment, clears touch/mobile emulation, and maps the user's

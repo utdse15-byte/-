@@ -1,5 +1,7 @@
 'use strict';
 
+const PKG_VERSION = require('../package.json').version;
+
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -241,7 +243,7 @@ async function main() {
       return response.json();
     }, 12000);
     assert.strictEqual(health.service, 'edge-phone-cdp-controller');
-    assert.strictEqual(health.version, '6.7.0');
+    assert.strictEqual(health.version, PKG_VERSION);
 
     const statusResponse = await fetch(`http://127.0.0.1:${httpPort}/api/status`, {
       headers: { Authorization: `Bearer ${token}` }

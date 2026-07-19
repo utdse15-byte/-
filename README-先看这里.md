@@ -1,15 +1,15 @@
-# Edge 手机远程浏览器控制器 v6.7.0（程序 + AI 交接）
+# Edge 手机远程浏览器控制器 v6.8.0（程序 + AI 交接）
 
-这个组合包把可直接使用的完整程序 ZIP、SHA-256、发布资料和 AI 交接规范放在一起。
+这个组合包把可直接使用的完整程序、发布资料和 AI 交接规范放在一起。仓库为唯一事实源：`02-AI交接/` 是交接材料唯一副本，正式发布 ZIP 与 SHA-256 由 GitHub Actions 在打 tag 时自动生成。
 
 ## 用户使用
 
 1. 打开 `01-程序`；
-2. 可用同目录的 `.sha256.txt` 校验程序 ZIP；
-3. 把 `edge-phone-cdp-inherit-live-v6.7.0.zip` 解压到新的固定目录，例如：
+2. 源码仓库中程序位于 `01-程序/edge-phone-cdp-inherit-live/`，可直接运行；正式发布的 `edge-phone-cdp-inherit-live-v6.8.0.zip` 及其 SHA-256 由 CI 生成并发布到 GitHub Releases；
+3. 若使用发布 ZIP，解压到新的固定目录，例如：
 
 ```text
-G:\edge-phone-cdp-inherit-live-v6.7.0
+G:\edge-phone-cdp-inherit-live-v6.8.0
 ```
 
 4. 先阅读程序内的 `README-中文.md`；
@@ -21,12 +21,12 @@ G:\edge-phone-cdp-inherit-live-v6.7.0
 
 1. `02-AI交接/AI交接-先读.md`
 2. `02-AI交接/README-先读.md`
-3. `02-AI交接/Edge手机远程浏览器控制器-需求与风险平衡规范-v1.1.md`
-4. `02-AI交接/Edge手机远程浏览器控制器-需求基线-v1.1.yaml`
-5. `02-AI交接/v6.7.0实现对照表.md`
+3. `02-AI交接/Edge手机远程浏览器控制器-需求与风险平衡规范-v1.2.md`
+4. `02-AI交接/Edge手机远程浏览器控制器-需求基线-v1.2.yaml`
+5. `02-AI交接/v6.8.0实现对照表.md`
 6. `02-AI交接/已知限制与后续路线.md`
 7. `02-AI交接/历史问题与设计结论.md`
-8. `03-发布资料` 中的 README、更新说明和验证报告
+8. `01-程序/edge-phone-cdp-inherit-live/` 中的 `README-中文.md`、`更新说明-v6.8.0.md` 和 `发布验证报告.md`
 
 ## 不可静默改变的要求
 
@@ -35,8 +35,9 @@ G:\edge-phone-cdp-inherit-live-v6.7.0
 - ChatGPT/Claude 默认严格人工模式：真实桌面 Edge 身份、鼠标/滚轮/键盘默认、原生触摸由用户临时开启；
 - 不加入自动发送、回答抓取、批量操作、验证码/限制绕过、指纹伪装或所谓 stealth；
 - 标签跟随默认使用 Windows UI Automation；不确定时保持当前标签，电脑切到其他应用时不得误切；
-- 正式版本继续提供完整 ZIP、SHA-256、更新说明、验证报告和同步后的 AI 交接资料。
+- v6.8.0 的静止画面高清化、电脑剪贴板桥和手机专用窗口都只做“网页 JS 观测不到”的优化：不执行页面脚本、不启用 Runtime/DOM、不激活窗口、不注入内容、不轮询、不自动同步、不抓取正文；
+- 正式版本继续提供完整 ZIP、SHA-256、更新说明、验证报告和同步后的 AI 交接资料（由 CI 生成）。
 
 ## 验证边界
 
-Linux 构建环境已完成语法、单元/模拟、项目完整性和真实 Chromium CDP 测试。浏览器页面自动化因容器策略被跳过。Windows Edge 原配置、Windows UI Automation、固定代理实际联网和 Android 真机仍需在目标设备上验收；不要把未执行的真机测试描述为已通过。
+Linux 构建环境已完成语法、单元/模拟、项目完整性、真实 Chromium CDP、静止 PNG 补拍与手机专用窗口作用域测试；本容器无 URLBlocklist，前端 UI 测试实际运行并通过。Windows Edge 原配置、Windows UI Automation、固定代理实际联网、剪贴板真实读写、专用窗口新标签落点和 Android 真机仍需在目标设备上验收；不要把未执行的真机测试描述为已通过。

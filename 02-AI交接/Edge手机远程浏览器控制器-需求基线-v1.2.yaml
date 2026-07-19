@@ -1,8 +1,8 @@
-schema_version: '1.1'
+schema_version: '1.2'
 date: '2026-07-19'
 project:
   name: Edge 手机远程浏览器控制器
-  implementation_version: 6.7.0
+  implementation_version: 6.8.0
   purpose: Android 手机实时查看并人工操作 Windows 原 Microsoft Edge 网页内容
   primary_sites:
   - chatgpt.com
@@ -21,6 +21,7 @@ immutable:
   inherit_original_edge_profile: true
   isolated_user_data_dir_forbidden: true
   whole_desktop_remote_control_not_primary: true
+  phone_dedicated_window_optional: true
 strict_manual_mode:
   mode: auto
   domains:
@@ -70,6 +71,33 @@ computer_files:
   default_sort: modified-desc
   requires_explicit_selection: true
   direct_original_path_to_edge: true
+clipboard_bridge:
+  enabled: true
+  direction: bidirectional
+  trigger: explicit_single_shot
+  polling: false
+  auto_sync: false
+  mechanism: powershell_get_set_clipboard
+  persists_to_disk: false
+  logs_content: false
+  oversize_policy: reject_no_truncate
+dedicated_window:
+  default: disabled
+  same_profile: true
+  main_window_untouched: true
+  tab_panel_scope: dedicated_window_only
+  tab_follow_scope: dedicated_window_only
+  ambiguous_match: keep_current_target
+  participates_in_strict_window_restore: false
+idle_sharpen:
+  enabled: true
+  delay_ms: 1500
+  format: png_lossless
+  uses_only_page_domain: true
+  activates_window: false
+  enables_runtime_or_dom: false
+  injects_page_content: false
+  loops: false
 prohibited:
 - headless automation
 - Selenium/Playwright/Puppeteer/WebDriver business automation
@@ -155,8 +183,7 @@ requirements:
 - id: HUMAN-005
   level: MUST
   category: 禁止伪装
-  text: 不得修改 navigator.webdriver、User-Agent、Client Hints、平台、时区、Canvas、WebGL、AudioContext、字体、插件或其他指纹；不得加入 stealth
-    方案。
+  text: 不得修改 navigator.webdriver、User-Agent、Client Hints、平台、时区、Canvas、WebGL、AudioContext、字体、插件或其他指纹；不得加入 stealth 方案。
   implementation: 已实现
   evidence: 严格模式无 UA/Client Hints/指纹覆盖；manual-compatibility.test.js 覆盖
 - id: HUMAN-006
@@ -249,6 +276,18 @@ requirements:
   text: 用户在手机标签面板明确选中标签时，允许激活对应 Edge 标签页。
   implementation: 已实现
   evidence: 手机 selectTarget 可激活目标
+- id: WIN-001
+  level: MUST
+  category: 专用窗口
+  text: 手机专用窗口为可选模式，默认关闭；开启后控制器在同一 Edge 配置下新开独立窄窗口专供手机操作，继承同一 Cookie/登录/扩展/会话，不改动电脑主窗口；退出或点关闭按钮即清理该窗口内标签，主窗口标签必须存活。
+  implementation: 已实现
+  evidence: setDedicatedWindow/ensureDedicatedWindow；同 profile newWindow；关闭清理
+- id: WIN-002
+  level: MUST
+  category: 专用窗口保守
+  text: 专用窗口模式下标签面板与 UIA 跟随只作用于专用窗口内的标签集合；集合外的前台标签不得触发切换，歧义仍保持当前标签；专用窗口由控制器创建，不参与严格模式的窗口尺寸保存与恢复。
+  implementation: 已实现
+  evidence: dedicatedTargetIdSet + chooseTargetFromUia allowedTargetIds；windows-edge-uia.test.js
 - id: HIST-001
   level: MUST
   category: 全局历史
@@ -327,6 +366,24 @@ requirements:
   text: 非严格站点默认保留用户偏好的直接触摸与拖拽、原生触摸事件。
   implementation: 已实现
   evidence: 通用模式默认 direct + native touch
+- id: UX-008
+  level: MUST
+  category: 静止高清
+  text: 页面持续无新帧且无输入超过阈值后，用无损 PNG 补拍替换最后一帧提升清晰度；任何输入或新帧立即回到实时流。补拍只用 Page 域被动截图（captureScreenshot/getLayoutMetrics），不执行页面脚本、不启用 Runtime/DOM、不激活或置顶窗口、不注入内容；补拍帧不再触发补拍，失败不进入重启恢复流程。
+  implementation: 已实现
+  evidence: maybeIdleSharpen 只用 Page.captureScreenshot(png)+getLayoutMetrics；noActivate；idle-sharpen.test.js 与真实 Chromium 覆盖
+- id: CLIP-001
+  level: MUST
+  category: 剪贴板显式
+  text: 电脑剪贴板读取与写入只能由用户在手机控制页当次显式触发，单次、双向；不得轮询、监听、自动同步或后台读取。
+  implementation: 已实现
+  evidence: clipboardGet/clipboardSet 请求-应答；无轮询路径；windows-clipboard.test.js
+- id: CLIP-002
+  level: MUST
+  category: 剪贴板边界
+  text: 剪贴板桥经 PowerShell Get-Clipboard/Set-Clipboard 在浏览器之外实现，不触碰目标网页、不使用 CDP Runtime、不解析内容、不落盘、不记录正文（仅记录字符数）；超过大小上限必须明确拒绝，不得静默截断。
+  implementation: 已实现
+  evidence: lib/windows-clipboard.js PowerShell Get/Set-Clipboard；不落盘/不记录正文；超限拒绝
 - id: REL-001
   level: MUST
   category: 断线安全
@@ -354,21 +411,27 @@ requirements:
 - id: PRIV-001
   level: MUST
   category: 最少持久化
-  text: 默认不落盘保存网页帧、截图、提示词、回答或电脑文件内容。
+  text: 默认不落盘保存网页帧、截图、提示词、回答、剪贴板内容或电脑文件内容。
   implementation: 已实现
   evidence: 帧仅内存；发布包清理日志、令牌和临时文件
 - id: PRIV-002
   level: MUST
   category: 诊断脱敏
-  text: 诊断包不包含令牌、Cookie、凭据、上传文件内容或网页正文；页面标题/网址日志必须明确提示可能敏感。
+  text: 诊断包不包含令牌、Cookie、凭据、上传文件内容、剪贴板正文或网页正文；页面标题/网址日志必须明确提示可能敏感。
   implementation: 已实现
   evidence: 诊断脚本脱敏令牌/CDP ID；明确日志可能含标题/网址
 - id: REL-003
   level: MUST
   category: 完整交付
   text: 每个正式版本必须提供完整 ZIP、版本号、SHA-256、更新说明、发布报告和 AI 交接材料，不得只给零散文件。
-  implementation: 本次交付完成
+  implementation: 本次交付完成；由 CI 自动打包
   evidence: 程序 ZIP、组合交接包、SHA、文档、报告
+- id: REL-004
+  level: MUST
+  category: CI交付
+  text: 正式版本的 ZIP、内部文件 SHA-256 清单与外部 ZIP SHA-256 由 CI 在打 tag 时自动生成，交接材料从单一 02-AI交接 源复制进 ZIP；仓库为唯一事实源，不得再维护多份人肉同步副本。
+  implementation: 本次交付完成
+  evidence: scripts/package-release.mjs + .github/workflows；02-AI交接 单一源
 - id: QA-001
   level: MUST
   category: 测试真实性
@@ -386,9 +449,13 @@ verification:
   - strict mode
   - UIA matching
   real_chromium: true
-  browser_ui_test: skipped_in_build_container_due_managed_url_blocklist
+  browser_ui_test: ran_and_passed_in_this_container_no_url_blocklist
   windows_edge_real_device: required
   android_real_device: required
+  idle_sharpen: passed
+  clipboard_bridge_protocol: passed
+  dedicated_window_real_chromium: passed
+  dedicated_window_new_tab_placement: windows_edge_real_device_required
 references:
 - id: R1
   title: OpenAI Terms of Use

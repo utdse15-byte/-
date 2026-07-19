@@ -1,5 +1,7 @@
 'use strict';
 
+const PKG_VERSION = require('../package.json').version;
+
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -167,7 +169,7 @@ async function main() {
       const response = await fetch(`http://127.0.0.1:${httpPort}/health`);
       if (!response.ok) return false;
       const health = await response.json();
-      return health.version === '6.7.0';
+      return health.version === PKG_VERSION;
     }, 12000, '控制器健康检查');
 
     phone = new WebSocket(`ws://127.0.0.1:${httpPort}/control?token=${encodeURIComponent(token)}&clientId=manual-test`);
@@ -180,7 +182,7 @@ async function main() {
       phone.once('error', reject);
     });
     const hello = await waitFor(() => texts.find((item) => item.type === 'hello'), 8000, '手机 hello');
-    assert.strictEqual(hello.version, '6.7.0');
+    assert.strictEqual(hello.version, PKG_VERSION);
     const activeCompatibility = await waitFor(() => texts.find((item) =>
       item.type === 'manualCompatibility' && item.active === true), 12000, '严格人工模式状态');
     assert.strictEqual(activeCompatibility.inputProfile, 'desktop-mouse-wheel');
