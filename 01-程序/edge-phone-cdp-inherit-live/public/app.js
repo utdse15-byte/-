@@ -266,6 +266,7 @@
   const storedMobileZoom = [90, 100, 110, 125, 150].includes(Number(storageGet('edgePhoneMobileZoomV68', '100')))
     ? Number(storageGet('edgePhoneMobileZoomV68', '100'))
     : 100;
+  const storedLiveTextSync = storageGet('edgePhoneLiveTextSyncV68', 'false') === 'true';
   const storedStreamPreset = ['auto', 'economy', 'realtime', 'balanced', 'clear'].includes(storageGet('edgePhoneStreamPresetV64', 'auto'))
     ? storageGet('edgePhoneStreamPresetV64', 'auto')
     : 'auto';
@@ -337,9 +338,14 @@
     inputMode: ['devtools', 'nativeTouch'].includes(storedInputMode) ? storedInputMode : 'nativeTouch',
     mobileZoom: storedMobileZoom,
     // 实时同步：本地文本框 → 远程网页输入框的纯写入镜像。liveSyncBase 是
-    // "远程输入框里由本机同步进去的文本"，作为差量计算基准。
-    liveTextSync: storageGet('edgePhoneLiveTextSyncV68', 'false') === 'true',
+    // "远程输入框里由本机同步进去的文本"（差量基准）；liveSyncBaseValid
+    // 表示"远程光标仍停在基准末尾"这一不变式是否还成立（点画面/换页/
+    // 发送失败都会打破它，需重新取回）；liveSyncWholeField 表示基准就是
+    // 远程输入框的全部内容（取回后成立），只有此时才允许 全选+整段替换。
+    liveTextSync: storedLiveTextSync,
     liveSyncBase: '',
+    liveSyncBaseValid: true,
+    liveSyncWholeField: false,
     gestureMode: storedGestureMode,
     followDesktopTabs: storedFollowDesktopTabs,
     desktopTabFollow: { enabled: storedFollowDesktopTabs, strategy: 'uia', uia: { available: false, running: false, reason: 'loading' } },
@@ -433,6 +439,10 @@
     resizeSettling: false
   };
   storageSet('edgePhoneClientIdV6', state.clientId);
+
+  // 实时同步基准失效入口。实现于控件接线处；这里先占位，供更早定义的
+  // 消息处理与手势代码在运行期调用（页面切换、点击画面等都要打破基准）。
+  let invalidateLiveSyncBase = () => {};
 
   const query = new URLSearchParams(location.search);
   const hashParams = new URLSearchParams(location.hash.replace(/^#/, ''));
@@ -1096,6 +1106,11 @@
           cancelAutoCalibration({ silent: true, removeRemote: false }).then(() => {
             showToast('标签页已切换，自动校准已取消。', 'warn', 3000);
           });
+        }
+        // 换页/换标签后远程输入框已不是原来那个：实时同步基准作废。
+        if ((message.url && state.pageState.url && message.url !== state.pageState.url) ||
+            (message.targetId && state.pageState.targetId && message.targetId !== state.pageState.targetId)) {
+          invalidateLiveSyncBase('页面已切换，实时同步已暂停：点"取回网页文本"重新对齐。');
         }
         state.pageState = { ...state.pageState, ...message };
         if (message.manualCompatibility) ingestManualCompatibility(message.manualCompatibility);
@@ -2640,6 +2655,17 @@
     if (gesture.mode === 'direct') {
       sendTouch(kind, point);
       markVisualDemand(`touch-${kind}`, 650);
+      // 位移很小的直接触摸就是一次"点击"：可能点了远程输入框内部、别的
+      // 输入框或按钮，远程光标不再停在同步基准末尾——宣告基准失效。
+      if (kind === 'end' && gesture.startPoint) {
+        const tapDistance = Math.hypot(
+          point.localX - gesture.startPoint.localX,
+          point.localY - gesture.startPoint.localY
+        );
+        if (tapDistance < smartMoveThreshold()) {
+          invalidateLiveSyncBase('点击了网页画面，远程光标位置已变化：实时同步已暂停，点"取回网页文本"重新对齐。');
+        }
+      }
     } else if (gesture.phase === 'scroll') {
       queueSmartScroll(point, gesture.lastScrollPoint || gesture.startPoint, gesture.clearSelectionPending);
       gesture.clearSelectionPending = false;
@@ -2649,6 +2675,7 @@
       showTapMarker(point.localX, point.localY);
       sendTap(point);
       markVisualDemand('smart-tap', 500);
+      invalidateLiveSyncBase('点击了网页画面，远程光标位置已变化：实时同步已暂停，点"取回网页文本"重新对齐。');
     }
 
     state.gesture = null;
@@ -3761,9 +3788,11 @@
     });
     // ===== 实时同步：本地文本框 → 远程网页输入框（纯写入，零页面信号）====
     // 差量按字素簇（Intl.Segmenter）计算：退格在编辑器里按"一个可见字符"
-    // 删除，用 UTF-16 单元计数会把 emoji 多删。小改动发 退格×N + insertText，
-    // 大改动（>40 字素）退回 全选 + 整段 insertText 一次替换。前提是远程
-    // 光标停在已同步文本末尾——"取回"与每次写入都满足该不变式。
+    // 删除，用 UTF-16 单元计数会把 emoji 多删。常见的末尾追加/末尾删除走
+    // 快路径（不做整段分簇）。小改动发 退格×N + insertText；大改动或删除
+    // 跨越换行（contenteditable 的退格在段落边界是"合并段落"而非删一个
+    // \n 字素）时，仅在基准等于远程全文（取回过）时用 全选+整段替换，
+    // 否则宣告基准失效要求重新取回——绝不冒险盲删。
     const graphemeSegmenter = typeof Intl !== 'undefined' && Intl.Segmenter
       ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
       : null;
@@ -3773,39 +3802,65 @@
     const liveEditLock = () => state.liveTextSync && state.role === 'controller';
     let liveSyncQueue = Promise.resolve();
     let liveSyncTimer = null;
+    invalidateLiveSyncBase = (toastMessage) => {
+      if (!state.liveTextSync) return;
+      state.liveSyncWholeField = false;
+      if (!state.liveSyncBaseValid) return;
+      // 没有任何已同步/待同步内容时静默失效（无可损失，也不打扰）。
+      if (!state.liveSyncBase && !elements.textInput.value) return;
+      state.liveSyncBaseValid = false;
+      clearTimeout(liveSyncTimer);
+      showToast(toastMessage || '页面焦点可能已变化，实时同步已暂停：点"取回网页文本"重新对齐后继续。', 'warn', 3400);
+    };
+    const liveSyncDiff = (base, next) => {
+      // 快路径：纯末尾追加 / 纯末尾删除（覆盖绝大多数打字场景，避免每次
+      // 击键对 2 万字整段分簇）。字素边界安全：追加以完整字素输入；删除
+      // 只统计被删尾段的字素数。
+      if (next.startsWith(base)) return { deletions: 0, insertion: next.slice(base.length), removed: '' };
+      if (base.startsWith(next)) {
+        const removed = base.slice(next.length);
+        return { deletions: toGraphemes(removed).length, insertion: '', removed };
+      }
+      const baseG = toGraphemes(base);
+      const nextG = toGraphemes(next);
+      let prefix = 0;
+      const max = Math.min(baseG.length, nextG.length);
+      while (prefix < max && baseG[prefix] === nextG[prefix]) prefix += 1;
+      const removed = baseG.slice(prefix).join('');
+      return { deletions: baseG.length - prefix, insertion: nextG.slice(prefix).join(''), removed };
+    };
     const flushLiveSync = () => {
-      if (!liveEditLock() || !wsIsOpen()) return;
+      clearTimeout(liveSyncTimer);
+      liveSyncTimer = null;
+      if (!liveEditLock() || !wsIsOpen()) return liveSyncQueue;
       liveSyncQueue = liveSyncQueue.then(async () => {
-        if (!liveEditLock() || !wsIsOpen()) return;
+        if (!liveEditLock() || !wsIsOpen() || !state.liveSyncBaseValid) return;
         const base = state.liveSyncBase;
         const next = elements.textInput.value;
         if (next === base) return;
-        const baseG = toGraphemes(base);
-        const nextG = toGraphemes(next);
-        let prefix = 0;
-        const max = Math.min(baseG.length, nextG.length);
-        while (prefix < max && baseG[prefix] === nextG[prefix]) prefix += 1;
-        const deletions = baseG.length - prefix;
-        const insertion = nextG.slice(prefix).join('');
+        const { deletions, insertion, removed } = liveSyncDiff(base, next);
+        const removedCrossesLine = removed.includes('\n');
         try {
-          if (deletions > 40) {
-            // 大改动：一次性全选替换，避免长文本逐字退格。
+          if (deletions > 40 || (deletions > 0 && removedCrossesLine)) {
+            if (!state.liveSyncWholeField) {
+              // 基准不是远程全文（未取回就开同步且远程可能有既有内容）：
+              // 全选替换会吞掉看不见的既有文本，宁可停下要求重新取回。
+              invalidateLiveSyncBase('这次改动较大，需要先点"取回网页文本"对齐后再同步，避免误删网页里的其他内容。');
+              return;
+            }
             await request('selectAll');
             if (next) await request('text', { text: next });
             else await request('key', { key: 'Backspace' });
           } else {
-            let remaining = deletions;
-            while (remaining > 0) {
-              const batch = Math.min(remaining, 200);
-              await request('key', { key: 'Backspace', count: batch });
-              remaining -= batch;
-            }
+            if (deletions > 0) await request('key', { key: 'Backspace', count: deletions });
             if (insertion) await request('text', { text: insertion });
           }
           state.liveSyncBase = next;
           markVisualDemand('live-sync', 500);
         } catch (error) {
-          showToast(`实时同步失败：${error.message}`, 'warn', 2600);
+          // 失败时远程可能已应用了一部分（超时≠未执行），基准不再可信：
+          // 立即失效并要求重新取回，绝不带着脏基准重试（会复合误删）。
+          invalidateLiveSyncBase(`实时同步中断（${error.message}），已暂停：点"取回网页文本"重新对齐。`);
         }
       });
       return liveSyncQueue;
@@ -3829,34 +3884,52 @@
       storageSet('edgePhoneLiveTextSyncV68', String(state.liveTextSync));
       applyLiveSyncUi();
       if (state.liveTextSync) {
+        state.liveSyncBase = '';
+        state.liveSyncBaseValid = true;
+        state.liveSyncWholeField = false;
         showToast('实时同步已开启：先点网页输入框，再点"取回网页文本"接管已有内容；本地编辑会即时镜像过去。', 'info', 4200);
         scheduleLiveSync();
       } else {
         state.liveSyncBase = '';
+        state.liveSyncBaseValid = true;
+        state.liveSyncWholeField = false;
       }
     });
     applyLiveSyncUi();
-    elements.pullTextButton.addEventListener('click', async () => {
-      try {
-        const result = await request('pullEditableText', {}, 15000);
-        if (!result?.ok) {
-          showToast('网页当前没有聚焦的输入框：先在网页里点一下要编辑的输入框，再点取回。', 'warn', 3600);
-          return;
+    elements.pullTextButton.addEventListener('click', () => {
+      // 与差量写入同一队列串行：绝不让取回的 全选/→ 和一次在途差量交错
+      // （交错时 退格 会命中全选选区、清空整个输入框）。
+      clearTimeout(liveSyncTimer);
+      liveSyncTimer = null;
+      liveSyncQueue = liveSyncQueue.then(async () => {
+        try {
+          const result = await request('pullEditableText', {}, 15000);
+          if (!result?.ok) {
+            showToast('网页当前没有聚焦的输入框：先在网页里点一下要编辑的输入框，再点取回。', 'warn', 3600);
+            return;
+          }
+          if (result.truncated) {
+            // 基准若是截断文本而远程还有看不见的尾部，之后的每次差量都会
+            // 盲改那段尾部——拒绝武装，绝不接管超长内容。
+            showToast(`网页文本超过 20000 字（共 ${result.length} 字），实时同步不接管超长内容，请直接在网页里编辑。`, 'warn', 4500);
+            return;
+          }
+          // 把远程光标固定到文本末尾，作为后续差量同步的基准。
+          await request('selectAll');
+          await request('key', { key: 'ArrowRight' });
+          const text = String(result.text || '');
+          elements.textInput.value = text;
+          state.liveSyncBase = text;
+          state.liveSyncBaseValid = true;
+          state.liveSyncWholeField = true;
+          elements.textInput.focus();
+          showToast(`已取回 ${result.length} 个字符，编辑将实时同步。`, 'ok', 2600);
+        } catch (error) {
+          showToast(error.message, 'error', 3500);
         }
-        // 把远程光标固定到文本末尾，作为后续差量同步的基准。
-        await request('selectAll');
-        await request('key', { key: 'ArrowRight' });
-        const text = String(result.text || '');
-        elements.textInput.value = text;
-        state.liveSyncBase = text;
-        elements.textInput.focus();
-        showToast(`已取回 ${result.length} 个字符${result.truncated ? '（超长已截断，建议直接在网页里编辑）' : ''}。`, 'ok', 2600);
-      } catch (error) {
-        showToast(error.message, 'error', 3500);
-      }
+      });
     });
     $('hideKeyboardButton').addEventListener('click', () => {
-      clearTimeout(liveSyncTimer);
       flushLiveSync();
       elements.keyboardPanel.classList.remove('open');
       elements.textInput.blur();
@@ -3866,12 +3939,23 @@
       if (liveEditLock()) {
         // 实时同步模式：文本已经镜像在远程输入框里，"发送"= 补齐最后的
         // 差量后按一次回车提交，然后两边都从空白重新开始。
+        if (!elements.textInput.value && !state.liveSyncBase) return; // 空内容不发裸回车
+        if (!state.liveSyncBaseValid) {
+          showToast('同步基准已失效：请先点"取回网页文本"重新对齐，再发送。', 'warn', 3200);
+          return;
+        }
         try {
-          clearTimeout(liveSyncTimer);
           await flushLiveSync();
+          // 补差量失败会使基准失效（内部已提示）；此时中止发送，本地文本
+          // 原样保留——绝不清掉用户唯一的完整副本再提交陈旧内容。
+          if (!state.liveSyncBaseValid || state.liveSyncBase !== elements.textInput.value) {
+            showToast('实时同步未完成，已取消发送（文字仍在本地输入框里）。', 'warn', 3200);
+            return;
+          }
           await request('key', { key: 'Enter' });
           elements.textInput.value = '';
           state.liveSyncBase = '';
+          state.liveSyncWholeField = false;
           if (keepFocus) elements.textInput.focus();
           markVisualDemand('text', 500);
         } catch (error) {
@@ -3904,17 +3988,23 @@
     // preventDefault 阻止按钮抢焦点——焦点留在本地文本框里，手机输入法
     // 不会因为按退格而收起。其余按键保持单击语义。
     const repeatableKeys = new Set(['Backspace', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
+    // 实时同步下的统一拦截：这些操作会移动远程光标/选区、破坏差量基准。
+    const blockedByLiveSync = (hint) => {
+      if (!liveEditLock()) return false;
+      showToast(`实时同步开启中：${hint}`, 'info', 2800);
+      return true;
+    };
     document.querySelectorAll('[data-key]').forEach((button) => {
       const key = button.dataset.key;
       const sendOnce = () => {
-        // 实时同步下退格/方向键会移动远程光标、破坏差量同步基准：
-        // 编辑一律在本地文本框完成（会自动镜像），这里只提示不发送。
-        if (repeatableKeys.has(key) && liveEditLock()) {
-          showToast('实时同步开启中：请直接在下方文本框里编辑，改动会自动同步到网页。', 'info', 2800);
-          return;
-        }
+        if (repeatableKeys.has(key) && blockedByLiveSync('请直接在下方文本框里编辑，改动会自动同步到网页。')) return;
         request('key', { key }).catch((error) => showToast(error.message, 'error'));
         markVisualDemand(`key-${key}`, 500);
+        // 回车会提交表单（远程输入框随之清空）、Tab 会移走远程焦点：
+        // 实时同步的差量基准就此作废，要求重新取回后再继续。
+        if ((key === 'Enter' || key === 'Tab') && liveEditLock()) {
+          invalidateLiveSyncBase('按下回车/Tab 后远程输入框状态已变化，实时同步已暂停：点"取回网页文本"重新对齐。');
+        }
       };
       if (!repeatableKeys.has(key)) {
         button.addEventListener('click', sendOnce);
@@ -3922,22 +4012,28 @@
       }
       let holdTimer = null;
       let repeatTimer = null;
-      let lastPointerDownAt = 0;
+      let lastPointerActivityAt = 0;
       const stopRepeat = () => {
+        // 抬手时间也要盖章：长按超过抑制窗口后浏览器仍会补发一个 click，
+        // 只按 pointerdown 计时会让那次 click 多发一个按键。
+        lastPointerActivityAt = Date.now();
         clearTimeout(holdTimer);
         holdTimer = null;
-        clearInterval(repeatTimer);
+        clearTimeout(repeatTimer);
         repeatTimer = null;
       };
       button.addEventListener('pointerdown', (event) => {
         event.preventDefault();
-        lastPointerDownAt = Date.now();
         stopRepeat();
+        lastPointerActivityAt = Date.now();
         sendOnce();
         if (liveEditLock()) return; // 锁定时只提示一次，不启动连发
-        holdTimer = setTimeout(() => {
-          repeatTimer = setInterval(sendOnce, 70);
-        }, 380);
+        // 连发用带抖动的节奏（58-88ms），不是精确等间隔的机器时序。
+        const repeatTick = () => {
+          sendOnce();
+          repeatTimer = setTimeout(repeatTick, 58 + Math.floor(Math.random() * 31));
+        };
+        holdTimer = setTimeout(() => { repeatTick(); }, 380);
       });
       button.addEventListener('pointerup', stopRepeat);
       button.addEventListener('pointercancel', stopRepeat);
@@ -3946,22 +4042,16 @@
       // pointerdown 已经发过一次；部分浏览器 preventDefault 后仍派发 click，
       // 忽略它避免双发。键盘/无障碍激活（无 pointerdown）仍走 click。
       button.addEventListener('click', () => {
-        if (Date.now() - lastPointerDownAt < 800) return;
+        if (Date.now() - lastPointerActivityAt < 800) return;
         sendOnce();
       });
     });
     $('selectAllButton').addEventListener('click', () => {
-      if (liveEditLock()) {
-        showToast('实时同步开启中：全选会破坏同步基准，请在下方文本框里编辑。', 'info', 2800);
-        return;
-      }
+      if (blockedByLiveSync('全选会破坏同步基准，请在下方文本框里编辑。')) return;
       request('selectAll').catch((error) => showToast(error.message, 'error'));
     });
     $('pasteButton').addEventListener('click', async () => {
-      if (liveEditLock()) {
-        showToast('实时同步开启中：请把内容粘贴到下方文本框，会自动同步到网页。', 'info', 2800);
-        return;
-      }
+      if (blockedByLiveSync('请把内容粘贴到下方文本框，会自动同步到网页。')) return;
       try {
         const text = await navigator.clipboard.readText();
         if (!text) throw new Error('剪贴板为空');
@@ -4559,13 +4649,18 @@
     // 只监听 resize（visualViewport 的 scroll 监听是历史红线：滚动期间逐帧
     // 连发会造成尺寸同步风暴）。innerHeight - vv.height 即输入法高度；#app
     // 缩短后布局全部落回可见区，浏览器会自行把视口滚回原位，无需 offsetTop。
+    // 捏合缩放（iOS Safari 无视 user-scalable=no、安卓无障碍强制缩放）也会
+    // 让 vv.height 变小——那不是输入法，scale 偏离 1 时一律视为无遮挡。
+    let appliedImeInset = -1;
     const updateImeInset = () => {
       const vv = window.visualViewport;
       if (!vv) return;
-      const inset = Math.max(0, Math.round(window.innerHeight - vv.height));
+      const pinchZoomed = Number.isFinite(vv.scale) && Math.abs(vv.scale - 1) > 0.02;
+      const inset = pinchZoomed ? 0 : Math.max(0, Math.round(window.innerHeight - vv.height));
       const applied = inset > 60 ? inset : 0;
+      if (applied === appliedImeInset) return; // 键盘/地址栏动画期间不重复写样式
+      appliedImeInset = applied;
       document.documentElement.style.setProperty('--ime-inset', `${applied}px`);
-      document.body.classList.toggle('ime-open', applied > 0);
     };
     window.visualViewport?.addEventListener('resize', updateImeInset, { passive: true });
     updateImeInset();
