@@ -4630,6 +4630,11 @@ const controllerOnlyTypes = new Set([
   'clipboardGet', 'clipboardSet', 'dedicatedWindow', 'rotateToken'
 ]);
 
+// 认证代数：连接建立时盖上当前代，令牌轮换时代数自增并关闭所有旧代连接。
+// 只改全局令牌字符串是不够的——那只挡得住"新建连接"，已认证的旧会话仍能
+// claimControl 并继续注入输入/读取剪贴板，与"轮换即撤销"的界面承诺不符。
+let authEpoch = 1;
+
 function reply(ws, requestId, result = {}) {
   if (!requestId) return;
   sendJson(ws, { type: 'reply', requestId, ok: true, result });
@@ -4645,6 +4650,7 @@ function replyError(ws, requestId, error) {
 
 wss.on('connection', (ws, req, info) => {
   const state = hub.add(ws, info);
+  state.authEpoch = authEpoch;
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 
@@ -4742,6 +4748,11 @@ wss.on('connection', (ws, req, info) => {
   async function handleCommand(message) {
     const requestId = message.requestId;
     try {
+      // 认证代数检查先于一切命令（包括 claimControl）：令牌轮换后旧代连接
+      // 不得再产生任何副作用，即使关闭帧尚未到达对端。
+      if (state.authEpoch !== authEpoch) {
+        throw new Error('访问令牌已轮换，本连接已失效，请使用新链接重新连接。');
+      }
       if (message.type === 'claimControl') {
         if (hub.controllerClientId && hub.controllerClientId !== state.clientId) {
           await cdp.releaseActiveInput('控制权切换');
@@ -4787,13 +4798,21 @@ wss.on('connection', (ws, req, info) => {
         return;
       }
       if (message.type === 'rotateToken') {
-        // 令牌轮换只能由已认证的控制端手机触发。轮换后当前连接仍有效（本次
-        // 连接已通过认证），把新令牌回给发起方以便更新并重连；其他旧令牌立即失效。
+        // 令牌轮换只能由已认证的控制端手机触发。轮换 = 撤销：发起连接保留
+        // （新令牌已回给它），其余已认证连接一律提升认证代数后以 4003 关闭
+        // ——只广播提示是不够的，已建立的会话不受令牌字符串变化影响，仍能
+        // claimControl 并继续注入命令。
         const rotated = rotateAccessToken();
-        log('warn', '用户轮换了访问令牌', { pinned: false });
+        authEpoch += 1;
+        state.authEpoch = authEpoch;
+        log('warn', '用户轮换了访问令牌并撤销其余连接', { revoked: Math.max(0, hub.clients.size - 1) });
         printAccessUrls('令牌已轮换，请在手机上使用新地址：');
         reply(ws, requestId, { token: rotated });
-        hub.broadcastJsonExcept(ws, { type: 'status', level: 'warn', message: '访问令牌已在电脑上轮换，请用新链接重新连接。' });
+        for (const [otherWs] of hub.clients) {
+          if (otherWs === ws) continue;
+          sendJson(otherWs, { type: 'status', level: 'warn', message: '访问令牌已在电脑上轮换，本连接即将断开，请用新链接重新连接。' });
+          try { otherWs.close(4003, 'token-rotated'); } catch {}
+        }
         return;
       }
       if (message.type === 'browserHistory') {
@@ -5152,6 +5171,9 @@ wss.on('connection', (ws, req, info) => {
 
   ws.on('message', (raw, isBinary) => {
     state.lastSeenAt = Date.now();
+    // 旧认证代的连接：丢弃一切入站数据（文本命令、触摸、二进制上传块）。
+    // 关闭帧已发出，但到达前的在途消息不得再产生副作用。
+    if (state.authEpoch !== authEpoch) return;
     if (isBinary) {
       messageQueue = messageQueue.then(() => handleBinaryUpload(raw)).catch(async (error) => {
         replyError(ws, null, error);

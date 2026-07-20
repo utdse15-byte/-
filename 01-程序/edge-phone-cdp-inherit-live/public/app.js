@@ -701,6 +701,17 @@
         showToast('检测到本机打开了第二个控制页，当前页面已停止自动重连。', 'warn', 0);
         return;
       }
+      // 4003 = 电脑上轮换了访问令牌，本连接被撤销。旧令牌已失效，自动重连
+      // 只会反复被拒——清掉本地令牌并停驻，等用户拿新链接/新令牌重新进入。
+      if (event?.code === 4003) {
+        state.evictedByPeer = true;
+        state.token = '';
+        storageSet('edgePhoneTokenV6', '');
+        showEmpty('访问令牌已轮换', '电脑上生成了新的访问令牌，本页面的旧令牌已失效。请在电脑控制器窗口查看新链接/二维码重新打开，或点"重新连接"后输入新令牌。', false);
+        if (elements.emptyReconnectButton) elements.emptyReconnectButton.hidden = false;
+        showToast('访问令牌已在电脑上轮换，当前页面已停止自动重连。', 'warn', 0);
+        return;
+      }
       if (state.currentFrame) {
         showToast(navigator.onLine ? '控制连接断开，正在自动重连；当前画面已保留。' : '手机当前离线；当前画面已保留。', 'warn', 0);
       } else {
