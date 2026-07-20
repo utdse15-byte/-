@@ -2353,11 +2353,15 @@
     const probe = report?.probe;
     if (!probe) return;
     const target = probe.chain?.[0];
+    const outsideX = report.point.x >= (Number(probe.innerWidth) || Infinity) || report.point.x < 0;
+    const outsideY = report.point.y >= (Number(probe.innerHeight) || Infinity) || report.point.y < 0;
     const summary = target
       ? `目标: ${target.tag}${target.id ? `#${target.id}` : ''}${target.aria ? `〔${target.aria}〕` : ''}` +
         `${target.disabled ? ' [已禁用]' : ''}${target.pointerEvents === 'none' ? ' [pointer-events:none]' : ''} · ` +
         `矩形 ${target.rect.width}×${target.rect.height}@(${target.rect.left},${target.rect.top})`
-      : '目标: 该点下没有元素';
+      : (outsideX || outsideY
+        ? `目标: 点(${report.point.x},${report.point.y}) 落在页面视口(${probe.innerWidth}×${probe.innerHeight})之外——服务端换算基准偏大`
+        : '目标: 该点下没有元素');
     const env = `点(${report.point.x},${report.point.y}) · 页面焦点:${probe.hasFocus ? '有' : '无'} · ` +
       `视口 ${probe.innerWidth}×${probe.innerHeight} vv缩放:${probe.visualViewport?.scale ?? '?'} · 触点:${probe.maxTouchPoints}`;
     if (elements.calibrationGuideText) elements.calibrationGuideText.textContent = `${summary} · ${env}`;

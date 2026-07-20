@@ -3568,6 +3568,23 @@ class CdpController {
     return { point: { x: px, y: py }, probe: evaluated?.result?.value || null };
   }
 
+  // 帧元数据携带的 CSS 视口尺寸可能滞后于当前页面（键盘弹出、模式切换后
+  // 的窗口期会被固化在帧里）。用滞后的偏大基准换算归一化坐标，页面中部
+  // 只是整体偏移，靠近底部的点会被推到视口之外——elementFromPoint 返回
+  // null，点击整体落空（ChatGPT 底部按钮一排全灭的真机根因）。换算基准
+  // 以服务端当前实时布局指标为准，帧上下文仅作回退。
+  withLiveViewportBasis(context) {
+    const metrics = this.layoutMetrics;
+    if (!metrics?.cssVisualViewport?.clientWidth) return context;
+    if (this.layoutMetricsTargetId && this.target?.id && this.layoutMetricsTargetId !== this.target.id) return context;
+    if (Date.now() - (this.layoutMetricsAt || 0) > 6000) return context;
+    return {
+      ...context,
+      cssVisualViewport: { ...metrics.cssVisualViewport },
+      cssLayoutViewport: { ...(metrics.cssLayoutViewport || context.cssLayoutViewport || {}) }
+    };
+  }
+
   cssPointForInput(x, y, rawContext = {}, u = null, v = null) {
     const context = this.coordinateContext(rawContext);
     const hasNormalized = hasFiniteOptionalNumber(u) && hasFiniteOptionalNumber(v);
@@ -3587,10 +3604,11 @@ class CdpController {
         hasNormalized
       };
     }
+    const basis = this.withLiveViewportBasis(context);
     const point = hasNormalized
-      ? normalizedToCssPoint(Number(u), Number(v), context)
-      : dipToCssPoint(x, y, context);
-    return { point, context, hasNormalized };
+      ? normalizedToCssPoint(Number(u), Number(v), basis)
+      : dipToCssPoint(x, y, basis);
+    return { point, context: basis, hasNormalized };
   }
 
   enqueueTouch(eventType, x, y, inputMode = 'nativeTouch', context = {}, gestureId = null, eventSequence = 0, u = null, v = null) {
@@ -3676,6 +3694,8 @@ class CdpController {
       while (this.touchQueue.length) {
         const command = this.touchQueue.shift();
         await this.ensureConnected(null, { activate: false, reason: 'input' });
+        // 手势起点决定整段手势的坐标基准；开始前确保布局指标新鲜。
+        if (command.eventType === 'start') await this.refreshLayoutMetrics(false).catch(() => {});
         await this.touch(
           command.eventType,
           command.x,
@@ -3866,6 +3886,8 @@ class CdpController {
   async tap(x, y, inputMode = 'nativeTouch', rawContext = {}, u = null, v = null) {
     this.markUserActivation();
     await this.releaseActiveInput('轻点');
+    // 保证换算基准新鲜（内部有 900ms 缓存与单飞，代价极小）。
+    await this.refreshLayoutMetrics(false).catch(() => {});
     const context = this.coordinateContext(rawContext);
     if (context.targetId && this.target?.id && context.targetId !== this.target.id) return;
     const serverRevision = Math.max(0, Number(this.viewport.revision) || 0);
@@ -3931,14 +3953,15 @@ class CdpController {
     const serverRevision = Math.max(0, Number(this.viewport.revision) || 0);
     if (context.viewportRevision && serverRevision && context.viewportRevision !== serverRevision) return;
     if (context.frameEpoch && this.frameEpoch && context.frameEpoch < this.frameEpoch) return;
+    const wheelBasis = this.withLiveViewportBasis(context);
     const hasNormalizedPoint = hasFiniteOptionalNumber(u) && hasFiniteOptionalNumber(v);
     const point = hasNormalizedPoint
-      ? normalizedToCssPoint(Number(u), Number(v), context)
-      : dipToCssPoint(x, y, context);
+      ? normalizedToCssPoint(Number(u), Number(v), wheelBasis)
+      : dipToCssPoint(x, y, wheelBasis);
     const hasNormalizedDelta = hasFiniteOptionalNumber(deltaU) && hasFiniteOptionalNumber(deltaV);
     const delta = hasNormalizedDelta
-      ? normalizedDeltaToCss(Number(deltaU), Number(deltaV), context)
-      : dipDeltaToCss(deltaX, deltaY, context);
+      ? normalizedDeltaToCss(Number(deltaU), Number(deltaV), wheelBasis)
+      : dipDeltaToCss(deltaX, deltaY, wheelBasis);
     const params = {
       type: 'mouseWheel',
       x: point.x,
