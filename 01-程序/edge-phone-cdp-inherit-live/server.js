@@ -126,7 +126,7 @@ const SNAPSHOT_FALLBACK_FPS = numberSetting(process.env.SNAPSHOT_FALLBACK_FPS ||
 // 静止画面高清化：页面持续无新帧、无输入时补拍一张无损 PNG，一有操作立即回到实时 JPEG。
 // 纯画面编码层的基础设施自动化（规范 2.3 允许范围），不触碰目标页面。
 const IDLE_SHARPEN_ENABLED = boolSetting(process.env.IDLE_SHARPEN_ENABLED ?? fileConfig.idleSharpenEnabled, true);
-const IDLE_SHARPEN_DELAY_MS = Math.round(numberSetting(process.env.IDLE_SHARPEN_DELAY_MS ?? fileConfig.idleSharpenDelayMs, 1500, 500, 15000));
+const IDLE_SHARPEN_DELAY_MS = Math.round(numberSetting(process.env.IDLE_SHARPEN_DELAY_MS ?? fileConfig.idleSharpenDelayMs, 900, 500, 15000));
 const MAX_UPLOAD_BYTES = Math.round(numberSetting(process.env.MAX_UPLOAD_BYTES, numberSetting(fileConfig.maxUploadMB, 512, 1, 4096) * 1024 * 1024, 1024 * 1024, 4 * 1024 * 1024 * 1024));
 const MAX_UPLOAD_FILES = Math.round(numberSetting(process.env.MAX_UPLOAD_FILES || fileConfig.maxUploadFiles, 64, 1, 500));
 const MAX_COMPUTER_FILES = Math.round(numberSetting(process.env.MAX_COMPUTER_FILES || fileConfig.maxComputerFiles, 256, 1, 2000));
@@ -2766,14 +2766,19 @@ class CdpController {
     let presetName = this.viewport.streamPreset;
     if (presetName === 'auto') {
       const pressure = hub.framePressure();
-      const current = ['economy', 'realtime', 'balanced'].includes(this.viewport.effectiveStreamPreset)
+      const current = ['economy', 'realtime', 'balanced', 'clear'].includes(this.viewport.effectiveStreamPreset)
         ? this.viewport.effectiveStreamPreset
         : 'realtime';
       const severe = pressure.bufferedBytes > 900 * 1024 || pressure.renderMs > 210 || pressure.awaitingAckMs > FRAME_ACK_TIMEOUT_MS * 0.9;
       const mild = pressure.bufferedBytes > 220 * 1024 || pressure.renderMs > 92 || pressure.awaitingAckMs > 180;
       const recovered = pressure.bufferedBytes < 96 * 1024 && pressure.renderMs > 0 && pressure.renderMs < 58 && pressure.awaitingAckMs < 90;
+      // 链路"优秀"才允许从均衡升到清晰档（2× 采集 + 高 JPEG 质量）：缓冲
+      // 几乎清空、渲染与确认都很快，局域网直连通常满足。升降档仍受自适应
+      // 切换的 6 秒稳定期与 20 秒冷却约束，不会抖动。
+      const excellent = pressure.bufferedBytes < 48 * 1024 && pressure.renderMs > 0 && pressure.renderMs < 46 && pressure.awaitingAckMs < 70;
       if (current === 'economy') presetName = recovered ? 'realtime' : 'economy';
-      else if (current === 'balanced') presetName = severe ? 'economy' : mild ? 'realtime' : 'balanced';
+      else if (current === 'clear') presetName = severe ? 'economy' : mild ? 'balanced' : 'clear';
+      else if (current === 'balanced') presetName = severe ? 'economy' : mild ? 'realtime' : excellent ? 'clear' : 'balanced';
       else presetName = severe ? 'economy' : recovered ? 'balanced' : 'realtime';
     }
     if (!STREAM_PRESETS[presetName]) presetName = 'realtime';

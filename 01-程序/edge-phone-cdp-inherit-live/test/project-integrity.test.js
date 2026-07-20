@@ -197,6 +197,11 @@ assert.ok(server.includes('一次性只读检查'));
 assert.ok(!app.includes("request('calibrationMarker'"));
 assert.ok(!app.includes("request('calibrationProbe'"));
 assert.ok(!server.includes('__edge_phone_cdp_calibration_probe__'));
+
+// 自动画面档阶梯必须包含"清晰"档：链路优秀时可升到 2× 采集（局域网场景
+// 的清晰度主要来源），有压力时逐级回落。
+assert.ok(server.includes("['economy', 'realtime', 'balanced', 'clear'].includes(this.viewport.effectiveStreamPreset)"));
+assert.ok(server.includes("excellent ? 'clear'"));
 assert.ok(!server.includes('__edge_phone_cdp_calibration_marker__'));
 assert.ok(!server.includes("document.createElement('div')"), '校准不得向目标页面插入 DOM');
 
