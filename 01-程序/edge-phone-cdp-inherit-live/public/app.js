@@ -19,6 +19,7 @@
     cancelCalibrationButton: $('cancelCalibrationButton'),
     emptyState: $('emptyState'),
     emptyTitle: $('emptyTitle'),
+    emptyReconnectButton: $('emptyReconnectButton'),
     emptyDetail: $('emptyDetail'),
     toast: $('toast'),
     roleBadge: $('roleBadge'),
@@ -411,6 +412,7 @@
     viewportSyncPending: false,
     viewportSyncWatchdogTimer: null,
     viewportSyncReason: '',
+    evictedByPeer: false,
     viewportSettleGeneration: 0,
     viewportSettleTimer: null,
     viewportFallbackTimer: null,
@@ -464,6 +466,8 @@
     elements.emptyDetail.textContent = detail || '';
     const spinner = elements.emptyState.querySelector('.spinner');
     spinner.hidden = !spinning;
+    // 重连按钮只在"被另一页面挤下线"的停驻状态显示（由该分支单独打开）。
+    if (elements.emptyReconnectButton) elements.emptyReconnectButton.hidden = true;
     elements.emptyState.hidden = false;
   }
 
@@ -559,6 +563,11 @@
     clearTimeout(state.reconnectTimer);
     state.reconnectTimer = null;
     state.reconnectDueAt = 0;
+    // 被同机另一个控制页挤下线（4001）后，一切自动路径（重连定时器、切回
+    // 前台、网络恢复）都不得再连——否则两个页面会互相顶掉对方，每秒断连
+    // 一次。只有用户显式点"重新连接"（force）才解除停驻。
+    if (state.evictedByPeer && !force) return;
+    if (force) state.evictedByPeer = false;
     if (!state.token) {
       setOverlay('tokenOverlay', true);
       elements.tokenInput.focus();
@@ -645,7 +654,7 @@
       elements.tokenError.textContent = '连接失败。请确认 IP、端口、防火墙和访问令牌。';
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       if (!isCurrent()) return;
       state.ws = null;
       cancelActiveGesture();
@@ -655,6 +664,16 @@
       rejectAllRequests('控制连接已断开');
       updateRoleUi();
       elements.roleBadge.textContent = '已断开';
+      // 4001 = 同一手机（相同 clientId）的另一个页面实例挤掉了本连接。
+      // 绝不能自动重连：两个实例会以约 1 秒周期互相顶掉对方，表现为
+      // "一直断开又连接"。本页面停下来，把选择权交给用户。
+      if (event?.code === 4001) {
+        state.evictedByPeer = true;
+        showEmpty('控制页已在其他页面打开', '同一手机同时只保留一个控制页。请关闭另一个页面（或旧的浏览器标签/应用），再点下方"重新连接"。', false);
+        if (elements.emptyReconnectButton) elements.emptyReconnectButton.hidden = false;
+        showToast('检测到本机打开了第二个控制页，当前页面已停止自动重连。', 'warn', 0);
+        return;
+      }
       if (state.currentFrame) {
         showToast(navigator.onLine ? '控制连接断开，正在自动重连；当前画面已保留。' : '手机当前离线；当前画面已保留。', 'warn', 0);
       } else {
@@ -954,6 +973,10 @@
       showToast(active
         ? '已进入严格人工模式：原 Windows Edge＋固定代理＋桌面鼠标/滚轮。'
         : '已退出严格人工模式，恢复通用手机触摸模式。', 'info', 3400);
+      // 退出严格模式时强制重发一次视口：把手机真实的舞台尺寸与手机/桌面
+      // 偏好重新告知服务端（严格模式期间手机可能旋转过、服务端存的宽高
+      // 已过期），让服务端以正确参数重建仿真，避免切换后页面尺寸异常。
+      if (!active) scheduleViewport(true, true, 'manual-mode-exit');
     }
     updateManualCompatibilityUi();
   }
@@ -1083,11 +1106,17 @@
         renderTabs(state.tabs, state.activeTabId);
         break;
       case 'viewport': {
-        state.viewport = { ...state.viewport, ...message };
+        const incoming = { ...message };
+        // 严格人工模式期间服务端广播的 mobile:false 只是"当前显示桌面环境"
+        // 的状态，不是用户的手机/桌面偏好。绝不能合入本地视口或写进
+        // localStorage，否则退出严格模式后手机会以桌面布局渲染手机宽度的
+        // 页面（尺寸异常），且重启后依旧。
+        if (state.manualCompatibility.active) delete incoming.mobile;
+        state.viewport = { ...state.viewport, ...incoming };
         const revision = Math.max(0, Number(message.revision) || 0);
         state.viewportRevisionCounter = Math.max(state.viewportRevisionCounter, revision);
         if (revision > state.requestedViewportRevision) state.requestedViewportRevision = revision;
-        storageSet('edgePhoneMobileV61', String(Boolean(state.viewport.mobile)));
+        if (!state.manualCompatibility.active) storageSet('edgePhoneMobileV61', String(Boolean(state.viewport.mobile)));
         storageSet('edgePhoneDesktopWidthV61', String(state.viewport.desktopWidth || storedDesktopWidth));
         if (state.viewport.streamPreset) storageSet('edgePhoneStreamPresetV64', state.viewport.streamPreset);
         elements.displayLabel.textContent = state.manualCompatibility.active ? (strictNativeTouchActive() ? '触摸' : '严格') : (state.viewport.mobile ? '手机' : '桌面');
@@ -2697,7 +2726,9 @@
         open.type = 'button';
         open.className = 'browser-history-open';
         open.disabled = state.role !== 'controller';
-        open.title = '在当前 Edge 标签页打开';
+        // 默认在新标签页打开：原地导航会覆盖当前页面（例如把正在使用的
+        // ChatGPT 对话页换掉），代价太高；想替换当前页的用右侧小按钮。
+        open.title = '在新的 Edge 标签页打开（保留当前页面）';
         const title = document.createElement('strong');
         title.textContent = item.title || item.url || '(无标题)';
         const url = document.createElement('small');
@@ -2705,9 +2736,9 @@
         open.append(title, url);
         open.addEventListener('click', async () => {
           try {
-            await request('navigate', { url: item.url }, 20000);
+            await request('newTab', { url: item.url }, 20000);
             setOverlay('tabsOverlay', false);
-            markVisualDemand('global-history-current-tab', 1000);
+            markVisualDemand('global-history-new-tab', 850);
           } catch (error) {
             showToast(error.message, 'error', 3500);
           }
@@ -2717,22 +2748,22 @@
         time.className = 'browser-history-time';
         time.textContent = historyTimeLabel(item.visitTimeMs);
 
-        const newTab = document.createElement('button');
-        newTab.type = 'button';
-        newTab.className = 'browser-history-newtab';
-        newTab.textContent = '+';
-        newTab.title = '在新的 Edge 标签页打开';
-        newTab.disabled = state.role !== 'controller';
-        newTab.addEventListener('click', async () => {
+        const hereTab = document.createElement('button');
+        hereTab.type = 'button';
+        hereTab.className = 'browser-history-newtab';
+        hereTab.textContent = '此页';
+        hereTab.title = '在当前 Edge 标签页打开（替换当前页面）';
+        hereTab.disabled = state.role !== 'controller';
+        hereTab.addEventListener('click', async () => {
           try {
-            await request('newTab', { url: item.url }, 20000);
+            await request('navigate', { url: item.url }, 20000);
             setOverlay('tabsOverlay', false);
-            markVisualDemand('global-history-new-tab', 850);
+            markVisualDemand('global-history-current-tab', 1000);
           } catch (error) {
             showToast(error.message, 'error', 3500);
           }
         });
-        row.append(open, time, newTab);
+        row.append(open, time, hereTab);
         elements.browserHistoryList.append(row);
       }
     }
@@ -3671,22 +3702,26 @@
       elements.textInput.blur();
       scheduleViewport(false);
     });
-    $('sendTextButton').addEventListener('click', async () => {
+    const sendKeyboardText = async ({ keepFocus }) => {
       const text = elements.textInput.value;
       if (!text) return;
       try {
         await request('text', { text });
         elements.textInput.value = '';
-        elements.textInput.focus();
+        // 点"发送"按钮时不再强制拉回焦点：focus() 会把手机系统输入法
+        // 重新弹出来。用回车发送（焦点本就在输入框里）时保持焦点，
+        // 方便连续输入。
+        if (keepFocus) elements.textInput.focus();
         markVisualDemand('text', 500);
       } catch (error) {
         showToast(error.message, 'error', 3500);
       }
-    });
+    };
+    $('sendTextButton').addEventListener('click', () => sendKeyboardText({ keepFocus: false }));
     elements.textInput.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
-        $('sendTextButton').click();
+        sendKeyboardText({ keepFocus: true });
       }
     });
     document.querySelectorAll('[data-key]').forEach((button) => {
@@ -3906,6 +3941,10 @@
       updateDiagnosticsText(true);
     });
     $('emptyRecoverButton').addEventListener('click', () => recoverFrame(true));
+    elements.emptyReconnectButton.addEventListener('click', () => {
+      elements.emptyReconnectButton.hidden = true;
+      reconnectNow();
+    });
     $('snapshotButton').addEventListener('click', () => recoverFrame(false));
     $('restartStreamButton').addEventListener('click', () => recoverFrame(true));
     $('syncViewportButton').addEventListener('click', () => {

@@ -223,9 +223,12 @@ async function main() {
     const touchBefore = observed.filter((item) => item.method === 'Input.dispatchTouchEvent' || item.method === 'Input.emulateTouchFromMouseEvent').length;
     reply = await sendRequest('tap', { x: 160, y: 220, inputMode: 'nativeTouch' });
     assert.strictEqual(reply.ok, true);
-    await waitFor(() => observed.filter((item) => item.method === 'Input.dispatchMouseEvent').length >= mouseBefore + 2, 5000, '普通鼠标点击');
+    await waitFor(() => observed.filter((item) => item.method === 'Input.dispatchMouseEvent').length >= mouseBefore + 3, 5000, '普通鼠标点击');
     const click = observed.filter((item) => item.method === 'Input.dispatchMouseEvent').slice(mouseBefore);
-    assert.deepStrictEqual(click.slice(0, 2).map((item) => item.params.type), ['mousePressed', 'mouseReleased']);
+    // 真实点击序列：悬停进入 → 按下（保持几十毫秒）→ 抬起。零时长、无悬停
+    // 的点击会被 ChatGPT 输入区的菜单触发器一类组件丢弃。
+    assert.deepStrictEqual(click.slice(0, 3).map((item) => item.params.type), ['mouseMoved', 'mousePressed', 'mouseReleased']);
+    assert.strictEqual(click[0].params.buttons, 0, '悬停移动不应按着按键');
     assert.strictEqual(observed.filter((item) => item.method === 'Input.dispatchTouchEvent' || item.method === 'Input.emulateTouchFromMouseEvent').length, touchBefore);
 
     reply = await sendRequest('wheel', { x: 180, y: 300, deltaX: 0, deltaY: 160, clearSelection: false });
@@ -264,6 +267,11 @@ async function main() {
     assert.strictEqual(reply.ok, true);
     assert.strictEqual(reply.result.active, false);
     await waitFor(() => observed.some((item) => item.method === 'Emulation.setDeviceMetricsOverride'), 7000, '恢复普通手机仿真');
+    // 严格模式期间手机发过 mobile:true 的视口消息（上面第 260 行），退出后
+    // 恢复的仿真必须仍是手机布局：曾有缺陷把严格模式的 mobile:false 显示
+    // 状态写进存储偏好，导致退出后以桌面布局渲染手机宽度页面（尺寸异常）。
+    const restoredMetrics = observed.filter((item) => item.method === 'Emulation.setDeviceMetricsOverride').at(-1);
+    assert.strictEqual(restoredMetrics.params.mobile, true, '退出严格模式必须恢复手机布局仿真，而不是桌面布局');
     const restoreBounds = observed.filter((item) => item.method === 'Browser.setWindowBounds')
       .find((item) => item.params?.bounds?.width === 1280 && item.params?.bounds?.height === 900);
     assert.ok(restoreBounds, '退出模式时应恢复用户原 Edge 窗口尺寸');

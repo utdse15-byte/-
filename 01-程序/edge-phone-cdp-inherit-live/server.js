@@ -14,6 +14,7 @@ const { EdgeHistoryService } = require('./lib/edge-history');
 const { EdgeUiaMonitor, chooseTargetFromUia } = require('./lib/windows-edge-uia');
 const { WindowsClipboardBridge } = require('./lib/windows-clipboard');
 const {
+  clampInsideViewport,
   dipDeltaToCss,
   dipToCssPoint,
   normalizeCoordinateContext,
@@ -2296,7 +2297,7 @@ class CdpController {
       await this.startScreencast(true);
       this.scheduleSnapshotIfStreamSilent('manual-compatibility-fallback', sequenceAtStart, 1000);
     }
-    hub.broadcastJson({ type: 'viewport', ...this.viewport });
+    hub.broadcastJson({ type: 'viewport', ...this.viewport, mobile: false });
     this.publishManualCompatibility();
   }
 
@@ -2387,8 +2388,11 @@ class CdpController {
     const normalized = ['auto', 'always', 'off'].includes(String(mode || '').toLowerCase())
       ? String(mode).toLowerCase()
       : 'auto';
+    // 手机每次连接都会重放该偏好；值没变时不要强制整套重建显示环境
+    // （停/启截屏流、重开截图），否则每次重连都产生一轮画面抖动与日志。
+    const changed = normalized !== this.manualCompatibilityOverride;
     this.manualCompatibilityOverride = normalized;
-    return this.refreshManualCompatibility('phone-setting', true);
+    return this.refreshManualCompatibility('phone-setting', changed);
   }
 
   chooseTarget(targets, targetId = null) {
@@ -3149,13 +3153,16 @@ class CdpController {
       const currentRevision = Math.max(0, Number(this.viewport.revision) || 0);
       const clientRevision = Math.max(0, Number(requestedRevision) || 0);
       const revision = clientRevision > currentRevision ? clientRevision : (force ? currentRevision + 1 : currentRevision);
-      this.viewport = { ...this.viewport, mobile: false, revision };
+      // 严格模式期间只更新修订号，绝不把 mobile:false 写进存储的视口偏好：
+      // 那会在退出严格模式后让 applyViewport 以桌面布局渲染手机宽度页面
+      // （尺寸异常）。广播里的 mobile:false 仅是当前显示状态。
+      this.viewport = { ...this.viewport, revision };
       // The phone may enter fullscreen or hide its address bar, but the strict-site page keeps
       // one stable real Edge window. Only acknowledge the phone geometry revision;
       // do not rewrite screen metrics or restart the page layout.
       this.screencastViewportRevision = revision;
       this.layoutMetricsViewportRevision = revision;
-      hub.broadcastJson({ type: 'viewport', ...this.viewport });
+      hub.broadcastJson({ type: 'viewport', ...this.viewport, mobile: false });
       this.publishManualCompatibility();
       if (this.isOpen()) {
         this.scheduleLayoutMetricsRefresh(30);
@@ -3191,8 +3198,8 @@ class CdpController {
 
   async setMobile(enabled) {
     if (this.manualCompatibilityActive) {
-      this.viewport.mobile = false;
-      hub.broadcastJson({ type: 'viewport', ...this.viewport });
+      // 同上：严格模式的桌面显示状态只进广播，不改写用户的手机/桌面偏好。
+      hub.broadcastJson({ type: 'viewport', ...this.viewport, mobile: false });
       this.publishManualCompatibility();
       return;
     }
@@ -3516,6 +3523,22 @@ class CdpController {
   cssPointForInput(x, y, rawContext = {}, u = null, v = null) {
     const context = this.coordinateContext(rawContext);
     const hasNormalized = hasFiniteOptionalNumber(u) && hasFiniteOptionalNumber(v);
+    // 严格人工模式没有设备仿真：帧内容就是真实窗口的 CSS 视口本身，帧内
+    // 坐标可以直通使用（与实测可靠的 dev 仿真路径同基准）。"归一化 × CSS
+    // 视口"的换算依赖布局指标元数据，真实窗口的刷新时序下可能拿到过期
+    // 基准，曾导致鼠标与原生触摸持续点偏、只打得中大目标（ChatGPT 输入区
+    // 的小按钮全部落空），而直通坐标的 dev 仿真一直正常。
+    if (this.manualCompatibilityActive) {
+      const width = Math.max(1, Number(context.contentDipWidth) || Number(context.deviceWidth) || this.viewport.width);
+      const height = Math.max(1, Number(context.contentDipHeight) || Number(context.deviceHeight) || this.viewport.height);
+      const px = hasNormalized ? clamp(Number(u), 0, 1) * width : (Number(x) || 0);
+      const py = hasNormalized ? clamp(Number(v), 0, 1) * height : (Number(y) || 0);
+      return {
+        point: { x: clampInsideViewport(px, width), y: clampInsideViewport(py, height) },
+        context,
+        hasNormalized
+      };
+    }
     const point = hasNormalized
       ? normalizedToCssPoint(Number(u), Number(v), context)
       : dipToCssPoint(x, y, context);
@@ -3633,10 +3656,20 @@ class CdpController {
   }
 
   async dispatchFileInputMouseClick(point) {
+    // 模拟真实用户点击：先有悬停进入，再按下并保持几十毫秒后抬起。
+    // 零时长、无悬停的按下-抬起序列是真实鼠标不可能产生的输入，
+    // ChatGPT 输入区的 "+"/模型选择器这类基于 pointer 事件时序的菜单
+    // 触发器会把它丢弃或"打开后又立刻关闭"，表现为按钮点不动。
+    await this.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x: point.x, y: point.y, button: 'none', buttons: 0,
+      modifiers: 0, pointerType: 'mouse'
+    });
+    await new Promise((resolve) => setTimeout(resolve, 12));
     await this.send('Input.dispatchMouseEvent', {
       type: 'mousePressed', x: point.x, y: point.y, button: 'left', buttons: 1,
       clickCount: 1, modifiers: 0, pointerType: 'mouse'
     });
+    await new Promise((resolve) => setTimeout(resolve, 60));
     await this.send('Input.dispatchMouseEvent', {
       type: 'mouseReleased', x: point.x, y: point.y, button: 'left', buttons: 0,
       clickCount: 1, modifiers: 0, pointerType: 'mouse'
@@ -3802,7 +3835,9 @@ class CdpController {
       await this.dispatchFileInputMouseClick(resolved.point);
     } else if (inputMode !== 'devtools') {
       await this.dispatchNativeTouch('start', px, py, context, {}, normalizedU, normalizedV);
-      await new Promise((resolve) => setTimeout(resolve, 16));
+      // 真实手指轻点的接触时长约 50-120ms；过短的合成轻点会被部分组件的
+      // pointer 时序逻辑忽略（与上方鼠标路径同理）。
+      await new Promise((resolve) => setTimeout(resolve, 60));
       await this.dispatchNativeTouch('end', px, py, context, {}, normalizedU, normalizedV);
     } else {
       await this.send('Input.emulateTouchFromMouseEvent', {
