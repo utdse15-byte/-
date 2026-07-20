@@ -798,7 +798,11 @@
 
   function effectiveInputMode() {
     if (!state.manualCompatibility?.active) return state.inputMode;
-    return strictNativeTouchActive() ? 'nativeTouch' : 'mouse';
+    // 严格模式默认桌面鼠标；用户显式开启"临时原生触摸"后，尊重输入模式
+    // 选择器（原生触摸 / dev 仿真）——部分站点移动布局的按钮只吃完整的
+    // "触摸→手势→点击"管线，dev 仿真是实测可靠的点击通道。
+    if (!strictNativeTouchActive()) return 'mouse';
+    return state.inputMode === 'devtools' ? 'devtools' : 'nativeTouch';
   }
 
   function effectiveGestureMode() {
@@ -855,8 +859,11 @@
       elements.gestureModeSelect.title = active ? '严格人工模式通过独立按钮在鼠标/滚轮与临时原生触摸之间切换' : '';
     }
     if (elements.inputModeSelect) {
-      elements.inputModeSelect.disabled = active;
-      elements.inputModeSelect.title = active ? '严格人工模式不使用此通用注入选项' : '';
+      // 严格模式下开启"临时原生触摸"后允许在 原生触摸/dev 仿真 之间选择。
+      elements.inputModeSelect.disabled = active && !nativeTouch;
+      elements.inputModeSelect.title = active
+        ? (nativeTouch ? '临时原生触摸已开启：可选原生触摸或 dev 仿真通道' : '严格人工模式默认桌面鼠标；开启临时原生触摸后可选注入通道')
+        : '';
     }
     if (elements.strictNativeTouchButton) {
       elements.strictNativeTouchButton.hidden = !active;
@@ -2324,8 +2331,39 @@
     state.calibrationTestRequest += 1;
     showCalibrationOverlayMarker(elements.calibrationRemoteMarker, point.u, point.v, geometry);
     if (!options.silent) {
-      showToast('蓝色十字是手指；红色十字是当前校准后会发送给 Edge 的位置。此测试完全在手机控制页绘制。', 'info', 5000);
+      showToast('蓝色十字是手指；红色十字是当前校准后会发送给 Edge 的位置。正在查询该点下的真实元素…', 'info', 3200);
+      // 远端探针：本地十字只能证明"手机侧算的位置"，证明不了服务端换算后
+      // 点在哪个元素上。探针一次性只读地回报目标元素链与视口状态。
+      try {
+        const report = await request('tapProbe', {
+          x: point.x,
+          y: point.y,
+          u: point.u,
+          v: point.v,
+          context: coordinateContextFromGeometry(geometry)
+        }, 9000);
+        renderTapProbeReport(report);
+      } catch (error) {
+        showToast(`远端元素探针失败：${error.message}`, 'warn', 3200);
+      }
     }
+  }
+
+  function renderTapProbeReport(report) {
+    const probe = report?.probe;
+    if (!probe) return;
+    const target = probe.chain?.[0];
+    const summary = target
+      ? `目标: ${target.tag}${target.id ? `#${target.id}` : ''}${target.aria ? `〔${target.aria}〕` : ''}` +
+        `${target.disabled ? ' [已禁用]' : ''}${target.pointerEvents === 'none' ? ' [pointer-events:none]' : ''} · ` +
+        `矩形 ${target.rect.width}×${target.rect.height}@(${target.rect.left},${target.rect.top})`
+      : '目标: 该点下没有元素';
+    const env = `点(${report.point.x},${report.point.y}) · 页面焦点:${probe.hasFocus ? '有' : '无'} · ` +
+      `视口 ${probe.innerWidth}×${probe.innerHeight} vv缩放:${probe.visualViewport?.scale ?? '?'} · 触点:${probe.maxTouchPoints}`;
+    if (elements.calibrationGuideText) elements.calibrationGuideText.textContent = `${summary} · ${env}`;
+    // 完整元素链输出到控制台，便于截图/复制给其他协作者分析。
+    console.log('[tapProbe]', JSON.stringify(report, null, 2));
+    showToast(summary, target && !target.disabled && target.pointerEvents !== 'none' ? 'ok' : 'warn', 6000);
   }
 
   async function refreshCalibrationProbe() {

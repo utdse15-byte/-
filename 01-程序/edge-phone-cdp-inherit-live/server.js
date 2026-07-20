@@ -3520,6 +3520,54 @@ class CdpController {
     });
   }
 
+  // 点击测试探针（用户当次显式点击触发，一次性、只读、不注入 DOM——与
+  // 环境审计同一边界；严格人工模式下同样仅限用户点击的那一刻执行一次）。
+  // 返回"服务端将要点击的位置"下方的元素链与视口状态，用于诊断"本地
+  // 校准显示无偏移、但真实点击不生效"一类问题（透明遮罩、元素禁用、
+  // 焦点丢失、视口缩放不一致等本地标记看不见的原因）。
+  async probeTapPoint(point) {
+    this.markUserActivation();
+    const px = Math.round(Number(point.x) || 0);
+    const py = Math.round(Number(point.y) || 0);
+    const expression = `(() => {
+      const x = ${px}, y = ${py};
+      const el = document.elementFromPoint(x, y);
+      const chain = [];
+      let node = el;
+      for (let i = 0; node && i < 4; i += 1) {
+        const r = node.getBoundingClientRect();
+        chain.push({
+          tag: node.tagName,
+          id: node.id || '',
+          cls: String(node.className && node.className.baseVal !== undefined ? node.className.baseVal : node.className || '').slice(0, 120),
+          role: node.getAttribute ? (node.getAttribute('role') || '') : '',
+          aria: node.getAttribute ? String(node.getAttribute('aria-label') || '').slice(0, 80) : '',
+          disabled: Boolean(node.disabled),
+          pointerEvents: getComputedStyle(node).pointerEvents,
+          rect: { left: Math.round(r.left), top: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) }
+        });
+        node = node.parentElement;
+      }
+      return {
+        point: { x, y },
+        hasFocus: document.hasFocus(),
+        activeElement: document.activeElement ? document.activeElement.tagName : '',
+        innerWidth,
+        innerHeight,
+        devicePixelRatio,
+        visualViewport: window.visualViewport ? {
+          width: Math.round(visualViewport.width), height: Math.round(visualViewport.height),
+          scale: visualViewport.scale, offsetTop: Math.round(visualViewport.offsetTop), offsetLeft: Math.round(visualViewport.offsetLeft)
+        } : null,
+        maxTouchPoints: navigator.maxTouchPoints,
+        chain
+      };
+    })()`;
+    const evaluated = await this.send('Runtime.evaluate', { expression, returnByValue: true }, { timeout: 5000 });
+    log('info', '用户触发点击测试探针（一次性只读检查）', { x: px, y: py, strict: this.manualCompatibilityActive });
+    return { point: { x: px, y: py }, probe: evaluated?.result?.value || null };
+  }
+
   cssPointForInput(x, y, rawContext = {}, u = null, v = null) {
     const context = this.coordinateContext(rawContext);
     const hasNormalized = hasFiniteOptionalNumber(u) && hasFiniteOptionalNumber(v);
@@ -4473,7 +4521,7 @@ server.on('upgrade', (req, socket, head) => {
 
 const controllerOnlyTypes = new Set([
   'viewport', 'navigate', 'back', 'forward', 'reload', 'touch', 'tap', 'wheel', 'text', 'key', 'selectAll',
-  'mobile', 'streamPreset', 'followDesktopTabs', 'manualCompatibility', 'strictNativeTouch', 'manualCompatibilityAudit', 'selectTarget', 'newTab', 'closeTab', 'navigateHistoryEntry', 'dialog', 'recoverFrame', 'frameQuality', 'frameProblem', 'calibrationMarker', 'calibrationProbe',
+  'mobile', 'streamPreset', 'followDesktopTabs', 'manualCompatibility', 'strictNativeTouch', 'manualCompatibilityAudit', 'selectTarget', 'newTab', 'closeTab', 'navigateHistoryEntry', 'dialog', 'recoverFrame', 'frameQuality', 'frameProblem', 'calibrationMarker', 'calibrationProbe', 'tapProbe',
   'requestUpload', 'cancelUpload', 'computerRoots', 'computerList', 'computerCommit', 'uploadBegin', 'uploadFileBegin', 'uploadChunkAck', 'uploadFileEnd', 'uploadCommit',
   // 浏览历史与电脑文件/剪贴板同属"屏幕画面之外的本机数据"，只读端不可见。
   'browserHistory',
@@ -4728,6 +4776,11 @@ wss.on('connection', (ws, req, info) => {
         case 'calibrationProbe':
           result = await cdp.showCalibrationProbe(message);
           break;
+        case 'tapProbe': {
+          const resolved = cdp.cssPointForInput(message.x, message.y, message.context || {}, message.u, message.v);
+          result = await cdp.probeTapPoint(resolved.point);
+          break;
+        }
         case 'tabs':
           await cdp.publishTabs(ws);
           break;
