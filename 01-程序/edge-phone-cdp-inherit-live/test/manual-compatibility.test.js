@@ -223,9 +223,12 @@ async function main() {
     const touchBefore = observed.filter((item) => item.method === 'Input.dispatchTouchEvent' || item.method === 'Input.emulateTouchFromMouseEvent').length;
     reply = await sendRequest('tap', { x: 160, y: 220, inputMode: 'nativeTouch' });
     assert.strictEqual(reply.ok, true);
-    await waitFor(() => observed.filter((item) => item.method === 'Input.dispatchMouseEvent').length >= mouseBefore + 2, 5000, '普通鼠标点击');
+    await waitFor(() => observed.filter((item) => item.method === 'Input.dispatchMouseEvent').length >= mouseBefore + 3, 5000, '普通鼠标点击');
     const click = observed.filter((item) => item.method === 'Input.dispatchMouseEvent').slice(mouseBefore);
-    assert.deepStrictEqual(click.slice(0, 2).map((item) => item.params.type), ['mousePressed', 'mouseReleased']);
+    // 真实点击序列：悬停进入 → 按下（保持几十毫秒）→ 抬起。零时长、无悬停
+    // 的点击会被 ChatGPT 输入区的菜单触发器一类组件丢弃。
+    assert.deepStrictEqual(click.slice(0, 3).map((item) => item.params.type), ['mouseMoved', 'mousePressed', 'mouseReleased']);
+    assert.strictEqual(click[0].params.buttons, 0, '悬停移动不应按着按键');
     assert.strictEqual(observed.filter((item) => item.method === 'Input.dispatchTouchEvent' || item.method === 'Input.emulateTouchFromMouseEvent').length, touchBefore);
 
     reply = await sendRequest('wheel', { x: 180, y: 300, deltaX: 0, deltaY: 160, clearSelection: false });

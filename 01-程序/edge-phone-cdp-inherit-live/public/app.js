@@ -3671,22 +3671,26 @@
       elements.textInput.blur();
       scheduleViewport(false);
     });
-    $('sendTextButton').addEventListener('click', async () => {
+    const sendKeyboardText = async ({ keepFocus }) => {
       const text = elements.textInput.value;
       if (!text) return;
       try {
         await request('text', { text });
         elements.textInput.value = '';
-        elements.textInput.focus();
+        // 点"发送"按钮时不再强制拉回焦点：focus() 会把手机系统输入法
+        // 重新弹出来。用回车发送（焦点本就在输入框里）时保持焦点，
+        // 方便连续输入。
+        if (keepFocus) elements.textInput.focus();
         markVisualDemand('text', 500);
       } catch (error) {
         showToast(error.message, 'error', 3500);
       }
-    });
+    };
+    $('sendTextButton').addEventListener('click', () => sendKeyboardText({ keepFocus: false }));
     elements.textInput.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
-        $('sendTextButton').click();
+        sendKeyboardText({ keepFocus: true });
       }
     });
     document.querySelectorAll('[data-key]').forEach((button) => {

@@ -3633,10 +3633,20 @@ class CdpController {
   }
 
   async dispatchFileInputMouseClick(point) {
+    // 模拟真实用户点击：先有悬停进入，再按下并保持几十毫秒后抬起。
+    // 零时长、无悬停的按下-抬起序列是真实鼠标不可能产生的输入，
+    // ChatGPT 输入区的 "+"/模型选择器这类基于 pointer 事件时序的菜单
+    // 触发器会把它丢弃或"打开后又立刻关闭"，表现为按钮点不动。
+    await this.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x: point.x, y: point.y, button: 'none', buttons: 0,
+      modifiers: 0, pointerType: 'mouse'
+    });
+    await new Promise((resolve) => setTimeout(resolve, 12));
     await this.send('Input.dispatchMouseEvent', {
       type: 'mousePressed', x: point.x, y: point.y, button: 'left', buttons: 1,
       clickCount: 1, modifiers: 0, pointerType: 'mouse'
     });
+    await new Promise((resolve) => setTimeout(resolve, 60));
     await this.send('Input.dispatchMouseEvent', {
       type: 'mouseReleased', x: point.x, y: point.y, button: 'left', buttons: 0,
       clickCount: 1, modifiers: 0, pointerType: 'mouse'
@@ -3802,7 +3812,9 @@ class CdpController {
       await this.dispatchFileInputMouseClick(resolved.point);
     } else if (inputMode !== 'devtools') {
       await this.dispatchNativeTouch('start', px, py, context, {}, normalizedU, normalizedV);
-      await new Promise((resolve) => setTimeout(resolve, 16));
+      // 真实手指轻点的接触时长约 50-120ms；过短的合成轻点会被部分组件的
+      // pointer 时序逻辑忽略（与上方鼠标路径同理）。
+      await new Promise((resolve) => setTimeout(resolve, 60));
       await this.dispatchNativeTouch('end', px, py, context, {}, normalizedU, normalizedV);
     } else {
       await this.send('Input.emulateTouchFromMouseEvent', {
