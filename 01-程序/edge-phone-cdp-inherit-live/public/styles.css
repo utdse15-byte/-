@@ -29,7 +29,10 @@ input, textarea, select { min-width: 0; border-radius: 11px; outline: none; }
 input:focus, textarea:focus, select:focus { border-color: #60a5fa; box-shadow: 0 0 0 2px rgba(37,99,235,.22); }
 [hidden] { display: none !important; }
 
-#app { width: 100%; height: 100dvh; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: #000; }
+/* --ime-inset：手机系统输入法在"覆盖不缩放"的浏览器里遮住的高度（由
+   visualViewport 计算）。支持 interactive-widget=resizes-content 的浏览器
+   里视口本身会缩小，该值恒为 0，不会双重补偿。 */
+#app { width: 100%; height: calc(100dvh - var(--ime-inset, 0px)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: #000; }
 #browserChrome { position: relative; z-index: 10; padding: calc(6px + env(safe-area-inset-top)) max(6px, env(safe-area-inset-right)) 6px max(6px, env(safe-area-inset-left)); background: var(--chrome); border-bottom: 1px solid var(--line-soft); }
 .nav-row { display: grid; grid-template-columns: 42px 42px minmax(0, 1fr); gap: 6px; }
 .icon-button { padding: 0; font-size: 24px; line-height: 1; }
@@ -249,8 +252,8 @@ body.immersive-fullscreen #fullscreenDock { display: flex; flex-direction: row-r
    app grid and therefore never resize the remote Edge viewport merely because
    the quick toolbar was opened or closed. */
 body.immersive-fullscreen #app {
-  height: 100vh;
-  height: 100dvh;
+  height: calc(100vh - var(--ime-inset, 0px));
+  height: calc(100dvh - var(--ime-inset, 0px));
   grid-template-rows: minmax(0, 1fr);
 }
 body.immersive-fullscreen #browserChrome { display: none !important; }
@@ -261,7 +264,7 @@ body.immersive-fullscreen #keyboardPanel.open {
   z-index: 46;
   left: max(6px, env(safe-area-inset-left));
   right: max(6px, env(safe-area-inset-right));
-  bottom: max(6px, env(safe-area-inset-bottom));
+  bottom: calc(max(6px, env(safe-area-inset-bottom)) + var(--ime-inset, 0px));
   display: grid;
   max-height: min(52dvh, 430px);
   overflow: auto;

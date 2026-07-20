@@ -3779,10 +3779,47 @@
         sendKeyboardText({ keepFocus: true });
       }
     });
+    // 退格/方向键支持按住连发（先 380ms 再每 70ms），且 pointerdown 上
+    // preventDefault 阻止按钮抢焦点——焦点留在本地文本框里，手机输入法
+    // 不会因为按退格而收起。其余按键保持单击语义。
+    const repeatableKeys = new Set(['Backspace', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
     document.querySelectorAll('[data-key]').forEach((button) => {
+      const key = button.dataset.key;
+      const sendOnce = () => {
+        request('key', { key }).catch((error) => showToast(error.message, 'error'));
+        markVisualDemand(`key-${key}`, 500);
+      };
+      if (!repeatableKeys.has(key)) {
+        button.addEventListener('click', sendOnce);
+        return;
+      }
+      let holdTimer = null;
+      let repeatTimer = null;
+      let lastPointerDownAt = 0;
+      const stopRepeat = () => {
+        clearTimeout(holdTimer);
+        holdTimer = null;
+        clearInterval(repeatTimer);
+        repeatTimer = null;
+      };
+      button.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        lastPointerDownAt = Date.now();
+        stopRepeat();
+        sendOnce();
+        holdTimer = setTimeout(() => {
+          repeatTimer = setInterval(sendOnce, 70);
+        }, 380);
+      });
+      button.addEventListener('pointerup', stopRepeat);
+      button.addEventListener('pointercancel', stopRepeat);
+      button.addEventListener('pointerleave', stopRepeat);
+      button.addEventListener('contextmenu', (event) => event.preventDefault());
+      // pointerdown 已经发过一次；部分浏览器 preventDefault 后仍派发 click，
+      // 忽略它避免双发。键盘/无障碍激活（无 pointerdown）仍走 click。
       button.addEventListener('click', () => {
-        request('key', { key: button.dataset.key }).catch((error) => showToast(error.message, 'error'));
-        markVisualDemand(`key-${button.dataset.key}`, 500);
+        if (Date.now() - lastPointerDownAt < 800) return;
+        sendOnce();
       });
     });
     $('selectAllButton').addEventListener('click', () => request('selectAll').catch((error) => showToast(error.message, 'error')));
@@ -4376,6 +4413,24 @@
       window.addEventListener('orientationchange', handleStageResize, { passive: true });
     }
     window.visualViewport?.addEventListener('resize', handleStageResize, { passive: true });
+    // 输入法避让：部分安卓浏览器不支持 interactive-widget=resizes-content，
+    // 系统输入法会直接盖在页面底部——输入面板（含退格键）被完全挡住。
+    // 用 visualViewport 算出被遮挡的高度写进 --ime-inset，让 #app 缩短、
+    // 全屏模式的输入面板上移，始终浮在输入法上方。支持 resizes-content
+    // 的浏览器里该值恒为 0。
+    // 只监听 resize（visualViewport 的 scroll 监听是历史红线：滚动期间逐帧
+    // 连发会造成尺寸同步风暴）。innerHeight - vv.height 即输入法高度；#app
+    // 缩短后布局全部落回可见区，浏览器会自行把视口滚回原位，无需 offsetTop。
+    const updateImeInset = () => {
+      const vv = window.visualViewport;
+      if (!vv) return;
+      const inset = Math.max(0, Math.round(window.innerHeight - vv.height));
+      const applied = inset > 60 ? inset : 0;
+      document.documentElement.style.setProperty('--ime-inset', `${applied}px`);
+      document.body.classList.toggle('ime-open', applied > 0);
+    };
+    window.visualViewport?.addEventListener('resize', updateImeInset, { passive: true });
+    updateImeInset();
     window.addEventListener('orientationchange', () => {
       setTimeout(() => {
         ensureCalibrationProfileCurrent('orientation-change');

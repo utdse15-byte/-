@@ -121,7 +121,7 @@ const EDGE_DEBUG_PROMPT_COOLDOWN_MS = Math.round(numberSetting(
 ) * 1000);
 const EDGE_WRAPPER_LAUNCH_AT_MS = Math.max(0, Number(process.env.EDGE_WRAPPER_LAUNCH_AT_MS) || 0);
 const SCREENCAST_QUALITY = Math.round(numberSetting(process.env.SCREENCAST_QUALITY || fileConfig.screencastQuality, 72, 30, 95));
-const SCREENCAST_MAX_DIMENSION = Math.round(numberSetting(process.env.SCREENCAST_MAX_DIMENSION || fileConfig.screencastMaxDimension, 2048, 640, 4096));
+const SCREENCAST_MAX_DIMENSION = Math.round(numberSetting(process.env.SCREENCAST_MAX_DIMENSION || fileConfig.screencastMaxDimension, 2560, 640, 4096));
 const SNAPSHOT_FALLBACK_FPS = numberSetting(process.env.SNAPSHOT_FALLBACK_FPS || fileConfig.snapshotFallbackFps, 3, 0.5, 10);
 // 静止画面高清化：页面持续无新帧、无输入时补拍一张无损 PNG，一有操作立即回到实时 JPEG。
 // 纯画面编码层的基础设施自动化（规范 2.3 允许范围），不触碰目标页面。
@@ -309,7 +309,9 @@ const STREAM_PRESETS = Object.freeze({
   economy: { quality: 44, maxDpr: 0.9, everyNthFrame: 2 },
   realtime: { quality: 56, maxDpr: 1.05, everyNthFrame: 1 },
   balanced: { quality: Math.min(SCREENCAST_QUALITY, 72), maxDpr: 1.35, everyNthFrame: 1 },
-  clear: { quality: Math.max(SCREENCAST_QUALITY, 82), maxDpr: 2, everyNthFrame: 1 }
+  // 清晰档 2.5× 与手机端 canvas 的像素密度上限一致：局域网下端到端像素
+  // 对齐，连续帧不再经历"低分辨率采集→手机放大"的糊化。
+  clear: { quality: Math.max(SCREENCAST_QUALITY, 82), maxDpr: 2.5, everyNthFrame: 1 }
 });
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
