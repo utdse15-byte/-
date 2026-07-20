@@ -3568,47 +3568,45 @@ class CdpController {
     return { point: { x: px, y: py }, probe: evaluated?.result?.value || null };
   }
 
-  // 帧元数据携带的 CSS 视口尺寸可能滞后于当前页面（键盘弹出、模式切换后
-  // 的窗口期会被固化在帧里）。用滞后的偏大基准换算归一化坐标，页面中部
-  // 只是整体偏移，靠近底部的点会被推到视口之外——elementFromPoint 返回
-  // null，点击整体落空（ChatGPT 底部按钮一排全灭的真机根因）。换算基准
-  // 以服务端当前实时布局指标为准，帧上下文仅作回退。
-  withLiveViewportBasis(context) {
+  // CDP 输入接口的坐标单位并不相同：Input.dispatchMouseEvent 与
+  // Input.dispatchTouchEvent 接收 CSS 像素；Input.emulateTouchFromMouseEvent
+  // （dev 仿真直通路径）接收 DIP。帧推导基准 contentDip ÷ pageScaleFactor
+  // 只除得掉捏合缩放，除不掉浏览器缩放（Ctrl +/-、按站点记忆，缩放时
+  // pageScaleFactor 仍是 1）——严格模式的真实窗口上 DIP 与 CSS 因此可能
+  // 不同，把 DIP 值当 CSS 用会整体偏移、底部溢出视口（elementFromPoint
+  // 返回 null、ChatGPT 底部按钮一排全灭）。CSS 像素的唯一可靠来源是服务端
+  // 实时 Page.getLayoutMetrics；此处返回新鲜且属于当前标签页的实时视口。
+  liveCssViewport() {
     const metrics = this.layoutMetrics;
-    if (!metrics?.cssVisualViewport?.clientWidth) return context;
-    if (this.layoutMetricsTargetId && this.target?.id && this.layoutMetricsTargetId !== this.target.id) return context;
-    if (Date.now() - (this.layoutMetricsAt || 0) > 6000) return context;
-    return {
-      ...context,
-      cssVisualViewport: { ...metrics.cssVisualViewport },
-      cssLayoutViewport: { ...(metrics.cssLayoutViewport || context.cssLayoutViewport || {}) }
-    };
+    if (!metrics?.cssVisualViewport?.clientWidth || !metrics?.cssVisualViewport?.clientHeight) return null;
+    if (this.layoutMetricsTargetId && this.target?.id && this.layoutMetricsTargetId !== this.target.id) return null;
+    if (Date.now() - (this.layoutMetricsAt || 0) > 6000) return null;
+    return metrics.cssVisualViewport;
   }
 
   cssPointForInput(x, y, rawContext = {}, u = null, v = null) {
     const context = this.coordinateContext(rawContext);
     const hasNormalized = hasFiniteOptionalNumber(u) && hasFiniteOptionalNumber(v);
-    // 严格人工模式没有设备仿真：帧内容就是真实窗口的 CSS 视口本身，帧内
-    // 坐标可以直通使用（与实测可靠的 dev 仿真路径同基准）。"归一化 × CSS
-    // 视口"的换算依赖布局指标元数据，真实窗口的刷新时序下可能拿到过期
-    // 基准，曾导致鼠标与原生触摸持续点偏、只打得中大目标（ChatGPT 输入区
-    // 的小按钮全部落空），而直通坐标的 dev 仿真一直正常。
-    if (this.manualCompatibilityActive) {
-      const width = Math.max(1, Number(context.contentDipWidth) || Number(context.deviceWidth) || this.viewport.width);
-      const height = Math.max(1, Number(context.contentDipHeight) || Number(context.deviceHeight) || this.viewport.height);
-      const px = hasNormalized ? clamp(Number(u), 0, 1) * width : (Number(x) || 0);
-      const py = hasNormalized ? clamp(Number(v), 0, 1) * height : (Number(y) || 0);
+    // 归一化坐标是"帧的比例"，与单位无关；乘以实时 CSS 视口得到的就是
+    // dispatchMouseEvent/dispatchTouchEvent 需要的 CSS 像素——对捏合缩放、
+    // 浏览器缩放、仿真页面一律正确。帧上下文换算仅作实时指标不可用时的回退。
+    const live = this.liveCssViewport();
+    if (hasNormalized && live) {
+      const nu = clamp(Number(u), 0, 1);
+      const nv = clamp(Number(v), 0, 1);
       return {
-        point: { x: clampInsideViewport(px, width), y: clampInsideViewport(py, height) },
+        point: {
+          x: clampInsideViewport(nu * live.clientWidth, live.clientWidth),
+          y: clampInsideViewport(nv * live.clientHeight, live.clientHeight)
+        },
         context,
         hasNormalized
       };
     }
-    const basis = this.withLiveViewportBasis(context);
     const point = hasNormalized
-      ? normalizedToCssPoint(Number(u), Number(v), basis)
-      : dipToCssPoint(x, y, basis);
-    return { point, context: basis, hasNormalized };
+      ? normalizedToCssPoint(Number(u), Number(v), context)
+      : dipToCssPoint(x, y, context);
+    return { point, context, hasNormalized };
   }
 
   enqueueTouch(eventType, x, y, inputMode = 'nativeTouch', context = {}, gestureId = null, eventSequence = 0, u = null, v = null) {
@@ -3934,6 +3932,8 @@ class CdpController {
     deltaU = null,
     deltaV = null
   ) {
+    // 与 tap/手势起点一致：换算基准需新鲜（内部 900ms 缓存与单飞）。
+    await this.refreshLayoutMetrics(false).catch(() => {});
     if (clearSelection) {
       await this.send('Runtime.evaluate', {
         expression: `(() => {
@@ -3953,15 +3953,23 @@ class CdpController {
     const serverRevision = Math.max(0, Number(this.viewport.revision) || 0);
     if (context.viewportRevision && serverRevision && context.viewportRevision !== serverRevision) return;
     if (context.frameEpoch && this.frameEpoch && context.frameEpoch < this.frameEpoch) return;
-    const wheelBasis = this.withLiveViewportBasis(context);
+    // 与 cssPointForInput 同一基准：滚轮的落点与位移都必须是 CSS 像素。
+    const live = this.liveCssViewport();
     const hasNormalizedPoint = hasFiniteOptionalNumber(u) && hasFiniteOptionalNumber(v);
-    const point = hasNormalizedPoint
-      ? normalizedToCssPoint(Number(u), Number(v), wheelBasis)
-      : dipToCssPoint(x, y, wheelBasis);
+    const point = hasNormalizedPoint && live
+      ? {
+        x: clampInsideViewport(clamp(Number(u), 0, 1) * live.clientWidth, live.clientWidth),
+        y: clampInsideViewport(clamp(Number(v), 0, 1) * live.clientHeight, live.clientHeight)
+      }
+      : (hasNormalizedPoint
+        ? normalizedToCssPoint(Number(u), Number(v), context)
+        : dipToCssPoint(x, y, context));
     const hasNormalizedDelta = hasFiniteOptionalNumber(deltaU) && hasFiniteOptionalNumber(deltaV);
-    const delta = hasNormalizedDelta
-      ? normalizedDeltaToCss(Number(deltaU), Number(deltaV), wheelBasis)
-      : dipDeltaToCss(deltaX, deltaY, wheelBasis);
+    const delta = hasNormalizedDelta && live
+      ? { deltaX: Number(deltaU) * live.clientWidth, deltaY: Number(deltaV) * live.clientHeight }
+      : (hasNormalizedDelta
+        ? normalizedDeltaToCss(Number(deltaU), Number(deltaV), context)
+        : dipDeltaToCss(deltaX, deltaY, context));
     const params = {
       type: 'mouseWheel',
       x: point.x,
