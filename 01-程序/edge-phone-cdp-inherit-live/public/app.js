@@ -32,6 +32,8 @@
     displayButton: $('displayButton'),
     keyboardPanel: $('keyboardPanel'),
     textInput: $('textInput'),
+    liveTextSyncToggle: $('liveTextSyncToggle'),
+    pullTextButton: $('pullTextButton'),
     tabsList: $('tabsList'),
     navigationHistoryList: $('navigationHistoryList'),
     historySection: $('historySection'),
@@ -334,6 +336,10 @@
     imageFailures: 0,
     inputMode: ['devtools', 'nativeTouch'].includes(storedInputMode) ? storedInputMode : 'nativeTouch',
     mobileZoom: storedMobileZoom,
+    // 实时同步：本地文本框 → 远程网页输入框的纯写入镜像。liveSyncBase 是
+    // "远程输入框里由本机同步进去的文本"，作为差量计算基准。
+    liveTextSync: storageGet('edgePhoneLiveTextSyncV68', 'false') === 'true',
+    liveSyncBase: '',
     gestureMode: storedGestureMode,
     followDesktopTabs: storedFollowDesktopTabs,
     desktopTabFollow: { enabled: storedFollowDesktopTabs, strategy: 'uia', uia: { available: false, running: false, reason: 'loading' } },
@@ -3718,6 +3724,7 @@
     state.roleControls = [
       $('goButton'), elements.addressInput, $('reloadButton'), $('keyboardButton'), $('uploadButton'), $('displayButton'),
       $('newTabButton'), $('newTabInput'), $('sendTextButton'), elements.textInput, $('selectAllButton'), $('pasteButton'),
+      elements.liveTextSyncToggle, elements.pullTextButton,
       elements.computerSourceButton, elements.phoneSourceButton, elements.computerRootsButton, elements.computerParentButton,
       elements.computerRefreshButton, elements.computerClearSelectionButton, elements.computerSortSelect,
       elements.computerSelectFolderButton, elements.phoneFiles, elements.startUploadButton,
@@ -3752,12 +3759,126 @@
       scheduleViewport(false);
       if (elements.keyboardPanel.classList.contains('open')) setTimeout(() => elements.textInput.focus(), 80);
     });
+    // ===== 实时同步：本地文本框 → 远程网页输入框（纯写入，零页面信号）====
+    // 差量按字素簇（Intl.Segmenter）计算：退格在编辑器里按"一个可见字符"
+    // 删除，用 UTF-16 单元计数会把 emoji 多删。小改动发 退格×N + insertText，
+    // 大改动（>40 字素）退回 全选 + 整段 insertText 一次替换。前提是远程
+    // 光标停在已同步文本末尾——"取回"与每次写入都满足该不变式。
+    const graphemeSegmenter = typeof Intl !== 'undefined' && Intl.Segmenter
+      ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+      : null;
+    const toGraphemes = (text) => graphemeSegmenter
+      ? Array.from(graphemeSegmenter.segment(text), (part) => part.segment)
+      : Array.from(text);
+    const liveEditLock = () => state.liveTextSync && state.role === 'controller';
+    let liveSyncQueue = Promise.resolve();
+    let liveSyncTimer = null;
+    const flushLiveSync = () => {
+      if (!liveEditLock() || !wsIsOpen()) return;
+      liveSyncQueue = liveSyncQueue.then(async () => {
+        if (!liveEditLock() || !wsIsOpen()) return;
+        const base = state.liveSyncBase;
+        const next = elements.textInput.value;
+        if (next === base) return;
+        const baseG = toGraphemes(base);
+        const nextG = toGraphemes(next);
+        let prefix = 0;
+        const max = Math.min(baseG.length, nextG.length);
+        while (prefix < max && baseG[prefix] === nextG[prefix]) prefix += 1;
+        const deletions = baseG.length - prefix;
+        const insertion = nextG.slice(prefix).join('');
+        try {
+          if (deletions > 40) {
+            // 大改动：一次性全选替换，避免长文本逐字退格。
+            await request('selectAll');
+            if (next) await request('text', { text: next });
+            else await request('key', { key: 'Backspace' });
+          } else {
+            let remaining = deletions;
+            while (remaining > 0) {
+              const batch = Math.min(remaining, 200);
+              await request('key', { key: 'Backspace', count: batch });
+              remaining -= batch;
+            }
+            if (insertion) await request('text', { text: insertion });
+          }
+          state.liveSyncBase = next;
+          markVisualDemand('live-sync', 500);
+        } catch (error) {
+          showToast(`实时同步失败：${error.message}`, 'warn', 2600);
+        }
+      });
+      return liveSyncQueue;
+    };
+    const scheduleLiveSync = () => {
+      if (!liveEditLock()) return;
+      clearTimeout(liveSyncTimer);
+      liveSyncTimer = setTimeout(flushLiveSync, 90);
+    };
+    elements.textInput.addEventListener('input', (event) => {
+      if (event.isComposing) return;
+      scheduleLiveSync();
+    });
+    elements.textInput.addEventListener('compositionend', scheduleLiveSync);
+    const applyLiveSyncUi = () => {
+      document.body.classList.toggle('live-sync-on', Boolean(state.liveTextSync));
+      elements.liveTextSyncToggle.checked = Boolean(state.liveTextSync);
+    };
+    elements.liveTextSyncToggle.addEventListener('change', () => {
+      state.liveTextSync = elements.liveTextSyncToggle.checked;
+      storageSet('edgePhoneLiveTextSyncV68', String(state.liveTextSync));
+      applyLiveSyncUi();
+      if (state.liveTextSync) {
+        showToast('实时同步已开启：先点网页输入框，再点"取回网页文本"接管已有内容；本地编辑会即时镜像过去。', 'info', 4200);
+        scheduleLiveSync();
+      } else {
+        state.liveSyncBase = '';
+      }
+    });
+    applyLiveSyncUi();
+    elements.pullTextButton.addEventListener('click', async () => {
+      try {
+        const result = await request('pullEditableText', {}, 15000);
+        if (!result?.ok) {
+          showToast('网页当前没有聚焦的输入框：先在网页里点一下要编辑的输入框，再点取回。', 'warn', 3600);
+          return;
+        }
+        // 把远程光标固定到文本末尾，作为后续差量同步的基准。
+        await request('selectAll');
+        await request('key', { key: 'ArrowRight' });
+        const text = String(result.text || '');
+        elements.textInput.value = text;
+        state.liveSyncBase = text;
+        elements.textInput.focus();
+        showToast(`已取回 ${result.length} 个字符${result.truncated ? '（超长已截断，建议直接在网页里编辑）' : ''}。`, 'ok', 2600);
+      } catch (error) {
+        showToast(error.message, 'error', 3500);
+      }
+    });
     $('hideKeyboardButton').addEventListener('click', () => {
+      clearTimeout(liveSyncTimer);
+      flushLiveSync();
       elements.keyboardPanel.classList.remove('open');
       elements.textInput.blur();
       scheduleViewport(false);
     });
     const sendKeyboardText = async ({ keepFocus }) => {
+      if (liveEditLock()) {
+        // 实时同步模式：文本已经镜像在远程输入框里，"发送"= 补齐最后的
+        // 差量后按一次回车提交，然后两边都从空白重新开始。
+        try {
+          clearTimeout(liveSyncTimer);
+          await flushLiveSync();
+          await request('key', { key: 'Enter' });
+          elements.textInput.value = '';
+          state.liveSyncBase = '';
+          if (keepFocus) elements.textInput.focus();
+          markVisualDemand('text', 500);
+        } catch (error) {
+          showToast(error.message, 'error', 3500);
+        }
+        return;
+      }
       const text = elements.textInput.value;
       if (!text) return;
       try {
@@ -3786,6 +3907,12 @@
     document.querySelectorAll('[data-key]').forEach((button) => {
       const key = button.dataset.key;
       const sendOnce = () => {
+        // 实时同步下退格/方向键会移动远程光标、破坏差量同步基准：
+        // 编辑一律在本地文本框完成（会自动镜像），这里只提示不发送。
+        if (repeatableKeys.has(key) && liveEditLock()) {
+          showToast('实时同步开启中：请直接在下方文本框里编辑，改动会自动同步到网页。', 'info', 2800);
+          return;
+        }
         request('key', { key }).catch((error) => showToast(error.message, 'error'));
         markVisualDemand(`key-${key}`, 500);
       };
@@ -3807,6 +3934,7 @@
         lastPointerDownAt = Date.now();
         stopRepeat();
         sendOnce();
+        if (liveEditLock()) return; // 锁定时只提示一次，不启动连发
         holdTimer = setTimeout(() => {
           repeatTimer = setInterval(sendOnce, 70);
         }, 380);
@@ -3822,8 +3950,18 @@
         sendOnce();
       });
     });
-    $('selectAllButton').addEventListener('click', () => request('selectAll').catch((error) => showToast(error.message, 'error')));
+    $('selectAllButton').addEventListener('click', () => {
+      if (liveEditLock()) {
+        showToast('实时同步开启中：全选会破坏同步基准，请在下方文本框里编辑。', 'info', 2800);
+        return;
+      }
+      request('selectAll').catch((error) => showToast(error.message, 'error'));
+    });
     $('pasteButton').addEventListener('click', async () => {
+      if (liveEditLock()) {
+        showToast('实时同步开启中：请把内容粘贴到下方文本框，会自动同步到网页。', 'info', 2800);
+        return;
+      }
       try {
         const text = await navigator.clipboard.readText();
         if (!text) throw new Error('剪贴板为空');

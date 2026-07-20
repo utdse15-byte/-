@@ -3575,6 +3575,35 @@ class CdpController {
     return { point: { x: px, y: py }, probe: evaluated?.result?.value || null };
   }
 
+  // 取回远程网页里聚焦输入框的现有文本。与 tapProbe/环境审计同一边界：
+  // 只在用户点击"取回"的那一刻执行一次、只读、不注入 DOM、绝不轮询。
+  // 写回方向（手机端"实时同步"）走纯 Input 通道（退格 + insertText），
+  // 不产生任何页面信号。
+  async pullEditableText() {
+    this.markUserActivation();
+    const expression = `(() => {
+      const el = document.activeElement;
+      const isField = Boolean(el && el.matches && el.matches('input, textarea'));
+      const editable = isField || Boolean(el && el.isContentEditable);
+      if (!editable) {
+        return { ok: false, reason: 'no-editable-focus', activeTag: el ? el.tagName : '' };
+      }
+      const raw = isField ? String(el.value ?? '') : String(el.innerText ?? '');
+      const limit = 20000;
+      return {
+        ok: true,
+        kind: isField ? 'field' : 'contenteditable',
+        tag: el.tagName,
+        truncated: raw.length > limit,
+        length: raw.length,
+        text: raw.slice(0, limit)
+      };
+    })()`;
+    const evaluated = await this.send('Runtime.evaluate', { expression, returnByValue: true }, { timeout: 5000 });
+    log('info', '用户触发取回输入框文本（一次性只读检查）', { strict: this.manualCompatibilityActive });
+    return evaluated?.result?.value || { ok: false, reason: 'no-result' };
+  }
+
   // CDP 输入接口的坐标单位并不相同：Input.dispatchMouseEvent 与
   // Input.dispatchTouchEvent 接收 CSS 像素；Input.emulateTouchFromMouseEvent
   // （dev 仿真直通路径）接收 DIP。帧推导基准 contentDip ÷ pageScaleFactor
@@ -4559,7 +4588,7 @@ server.on('upgrade', (req, socket, head) => {
 
 const controllerOnlyTypes = new Set([
   'viewport', 'navigate', 'back', 'forward', 'reload', 'touch', 'tap', 'wheel', 'text', 'key', 'selectAll',
-  'mobile', 'streamPreset', 'followDesktopTabs', 'manualCompatibility', 'strictNativeTouch', 'manualCompatibilityAudit', 'selectTarget', 'newTab', 'closeTab', 'navigateHistoryEntry', 'dialog', 'recoverFrame', 'frameQuality', 'frameProblem', 'calibrationMarker', 'calibrationProbe', 'tapProbe',
+  'mobile', 'streamPreset', 'followDesktopTabs', 'manualCompatibility', 'strictNativeTouch', 'manualCompatibilityAudit', 'selectTarget', 'newTab', 'closeTab', 'navigateHistoryEntry', 'dialog', 'recoverFrame', 'frameQuality', 'frameProblem', 'calibrationMarker', 'calibrationProbe', 'tapProbe', 'pullEditableText',
   'requestUpload', 'cancelUpload', 'computerRoots', 'computerList', 'computerCommit', 'uploadBegin', 'uploadFileBegin', 'uploadChunkAck', 'uploadFileEnd', 'uploadCommit',
   // 浏览历史与电脑文件/剪贴板同属"屏幕画面之外的本机数据"，只读端不可见。
   'browserHistory',
@@ -4774,9 +4803,14 @@ wss.on('connection', (ws, req, info) => {
         case 'text':
           await cdp.insertText(message.text);
           break;
-        case 'key':
-          await cdp.pressKey(message.key, message.modifiers);
+        case 'key': {
+          // count 供实时同步的批量退格使用（差量删除），普通按键仍为 1。
+          const repeat = clampInt(message.count, 1, 200, 1);
+          for (let i = 0; i < repeat; i += 1) {
+            await cdp.pressKey(message.key, message.modifiers);
+          }
           break;
+        }
         case 'selectAll':
           await cdp.selectAll();
           break;
@@ -4819,6 +4853,9 @@ wss.on('connection', (ws, req, info) => {
           result = await cdp.probeTapPoint(resolved.point);
           break;
         }
+        case 'pullEditableText':
+          result = await cdp.pullEditableText();
+          break;
         case 'tabs':
           await cdp.publishTabs(ws);
           break;

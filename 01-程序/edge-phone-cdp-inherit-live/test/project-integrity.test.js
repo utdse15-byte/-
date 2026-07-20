@@ -198,6 +198,12 @@ assert.ok(!app.includes("request('calibrationMarker'"));
 assert.ok(!app.includes("request('calibrationProbe'"));
 assert.ok(!server.includes('__edge_phone_cdp_calibration_probe__'));
 
+// 实时同步：读方向只有用户点击"取回"的一次性只读探针（与 tapProbe 同
+// 边界），写方向纯 Input 通道；差量按字素簇计算（emoji 不多删）。
+assert.ok(app.includes("request('pullEditableText'"));
+assert.ok(server.includes('用户触发取回输入框文本（一次性只读检查）'));
+assert.ok(app.includes("granularity: 'grapheme'"));
+
 // 自动画面档阶梯必须包含"清晰"档：链路优秀时可升到 2× 采集（局域网场景
 // 的清晰度主要来源），有压力时逐级回落。
 assert.ok(server.includes("['economy', 'realtime', 'balanced', 'clear'].includes(this.viewport.effectiveStreamPreset)"));

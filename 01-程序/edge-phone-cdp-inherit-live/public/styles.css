@@ -91,6 +91,12 @@ input:focus, textarea:focus, select:focus { border-color: #60a5fa; box-shadow: 0
 #keyboardPanel { display: none; gap: 6px; padding: 7px max(7px, env(safe-area-inset-right)) calc(7px + env(safe-area-inset-bottom)) max(7px, env(safe-area-inset-left)); background: var(--chrome); border-top: 1px solid var(--line-soft); }
 #keyboardPanel.open { display: grid; }
 .keyboard-input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.keyboard-sync-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+.keyboard-sync-row button { min-height: 34px; padding: 0 10px; font-size: 12px; }
+/* 实时同步开启时，这些远程编辑键会破坏"光标在已同步文本末尾"的基准，
+   点击会得到提示而不发送；置灰作视觉提示。 */
+body.live-sync-on [data-key="Backspace"], body.live-sync-on [data-key^="Arrow"],
+body.live-sync-on #selectAllButton, body.live-sync-on #pasteButton { opacity: .45; }
 #textInput { resize: none; min-height: 52px; max-height: 100px; padding: 8px 10px; background: #0f172a; }
 .primary { background: var(--accent); border-color: #3b82f6; }
 .primary:active { background: var(--accent-active); }
@@ -99,7 +105,8 @@ input:focus, textarea:focus, select:focus { border-color: #60a5fa; box-shadow: 0
 .key-grid button { min-width: 0; padding-inline: 3px; }
 .key-grid .wide { grid-column: span 5; }
 
-.overlay { position: fixed; inset: 0; z-index: 50; display: grid; align-items: end; padding: 10px max(10px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left)); background: rgba(0,0,0,.67); backdrop-filter: blur(3px); }
+/* 底部贴靠的面板同样要为输入法让位（全屏里输入新标签地址、令牌等场景）。 */
+.overlay { position: fixed; inset: 0; z-index: 50; display: grid; align-items: end; padding: 10px max(10px, env(safe-area-inset-right)) calc(max(10px, env(safe-area-inset-bottom)) + var(--ime-inset, 0px)) max(10px, env(safe-area-inset-left)); background: rgba(0,0,0,.67); backdrop-filter: blur(3px); }
 .sheet { width: min(680px, 100%); max-height: min(88dvh, 920px); justify-self: center; overflow: auto; overscroll-behavior: contain; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 15px; box-shadow: 0 22px 70px rgba(0,0,0,.5); }
 .sheet.compact { max-width: 480px; align-self: center; }
 .sheet-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
