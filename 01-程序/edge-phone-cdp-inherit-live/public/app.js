@@ -73,6 +73,7 @@
     tokenError: $('tokenError'),
     rendererSelect: $('rendererSelect'),
     inputModeSelect: $('inputModeSelect'),
+    mobileZoomSelect: $('mobileZoomSelect'),
     gestureModeSelect: $('gestureModeSelect'),
     streamPresetSelect: $('streamPresetSelect'),
     followDesktopTabsToggle: $('followDesktopTabsToggle'),
@@ -257,6 +258,12 @@
   const storedQuality = clamp(Number(storageGet('edgePhoneQualityV6', '72')) || 72, 35, 92);
   const storedMobile = storageGet('edgePhoneMobileV61', 'true') !== 'false';
   const storedDesktopWidth = clamp(Number(storageGet('edgePhoneDesktopWidthV61', '1280')) || 1280, 800, 2560);
+  // 手机页面缩放：把仿真视口按比例缩小，同屏显示即等比放大内容（与
+  // Edge 的 Ctrl+ 缩放同效）。只影响普通手机仿真页面；严格人工模式保持
+  // 真实桌面窗口（其缩放由 Edge 自身按站点记忆）。
+  const storedMobileZoom = [90, 100, 110, 125, 150].includes(Number(storageGet('edgePhoneMobileZoomV68', '100')))
+    ? Number(storageGet('edgePhoneMobileZoomV68', '100'))
+    : 100;
   const storedStreamPreset = ['auto', 'economy', 'realtime', 'balanced', 'clear'].includes(storageGet('edgePhoneStreamPresetV64', 'auto'))
     ? storageGet('edgePhoneStreamPresetV64', 'auto')
     : 'auto';
@@ -326,6 +333,7 @@
     canvasFailures: 0,
     imageFailures: 0,
     inputMode: ['devtools', 'nativeTouch'].includes(storedInputMode) ? storedInputMode : 'nativeTouch',
+    mobileZoom: storedMobileZoom,
     gestureMode: storedGestureMode,
     followDesktopTabs: storedFollowDesktopTabs,
     desktopTabFollow: { enabled: storedFollowDesktopTabs, strategy: 'uia', uia: { available: false, running: false, reason: 'loading' } },
@@ -798,7 +806,11 @@
 
   function effectiveInputMode() {
     if (!state.manualCompatibility?.active) return state.inputMode;
-    return strictNativeTouchActive() ? 'nativeTouch' : 'mouse';
+    // 严格模式默认桌面鼠标；用户显式开启"临时原生触摸"后，尊重输入模式
+    // 选择器（原生触摸 / dev 仿真）——部分站点移动布局的按钮只吃完整的
+    // "触摸→手势→点击"管线，dev 仿真是实测可靠的点击通道。
+    if (!strictNativeTouchActive()) return 'mouse';
+    return state.inputMode === 'devtools' ? 'devtools' : 'nativeTouch';
   }
 
   function effectiveGestureMode() {
@@ -855,8 +867,11 @@
       elements.gestureModeSelect.title = active ? '严格人工模式通过独立按钮在鼠标/滚轮与临时原生触摸之间切换' : '';
     }
     if (elements.inputModeSelect) {
-      elements.inputModeSelect.disabled = active;
-      elements.inputModeSelect.title = active ? '严格人工模式不使用此通用注入选项' : '';
+      // 严格模式下开启"临时原生触摸"后允许在 原生触摸/dev 仿真 之间选择。
+      elements.inputModeSelect.disabled = active && !nativeTouch;
+      elements.inputModeSelect.title = active
+        ? (nativeTouch ? '临时原生触摸已开启：可选原生触摸或 dev 仿真通道' : '严格人工模式默认桌面鼠标；开启临时原生触摸后可选注入通道')
+        : '';
     }
     if (elements.strictNativeTouchButton) {
       elements.strictNativeTouchButton.hidden = !active;
@@ -1788,9 +1803,11 @@
     if (size.rawWidth < 100 || size.rawHeight < 100) return false;
     const mobile = Boolean(state.viewport.mobile);
     const desktopWidth = clamp(Number(state.viewport.desktopWidth) || storedDesktopWidth, 800, 2560);
-    const width = mobile ? Math.max(240, size.width) : desktopWidth;
+    // 手机页面缩放：仿真视口按比例缩小，同屏显示即等比放大内容。
+    const zoom = clamp((Number(state.mobileZoom) || 100) / 100, 0.9, 1.5);
+    const width = mobile ? Math.max(240, Math.round(size.width / zoom)) : desktopWidth;
     const height = mobile
-      ? Math.max(320, size.height)
+      ? Math.max(320, Math.round(size.height / zoom))
       : clamp(Math.round(width * size.rawHeight / Math.max(1, size.rawWidth)), 480, 2560);
     const next = {
       width,
@@ -2324,8 +2341,43 @@
     state.calibrationTestRequest += 1;
     showCalibrationOverlayMarker(elements.calibrationRemoteMarker, point.u, point.v, geometry);
     if (!options.silent) {
-      showToast('蓝色十字是手指；红色十字是当前校准后会发送给 Edge 的位置。此测试完全在手机控制页绘制。', 'info', 5000);
+      showToast('蓝色十字是手指；红色十字是当前校准后会发送给 Edge 的位置。正在查询该点下的真实元素…', 'info', 3200);
+      // 远端探针：本地十字只能证明"手机侧算的位置"，证明不了服务端换算后
+      // 点在哪个元素上。探针一次性只读地回报目标元素链与视口状态。
+      try {
+        const report = await request('tapProbe', {
+          x: point.x,
+          y: point.y,
+          u: point.u,
+          v: point.v,
+          context: coordinateContextFromGeometry(geometry)
+        }, 9000);
+        renderTapProbeReport(report);
+      } catch (error) {
+        showToast(`远端元素探针失败：${error.message}`, 'warn', 3200);
+      }
     }
+  }
+
+  function renderTapProbeReport(report) {
+    const probe = report?.probe;
+    if (!probe) return;
+    const target = probe.chain?.[0];
+    const outsideX = report.point.x >= (Number(probe.innerWidth) || Infinity) || report.point.x < 0;
+    const outsideY = report.point.y >= (Number(probe.innerHeight) || Infinity) || report.point.y < 0;
+    const summary = target
+      ? `目标: ${target.tag}${target.id ? `#${target.id}` : ''}${target.aria ? `〔${target.aria}〕` : ''}` +
+        `${target.disabled ? ' [已禁用]' : ''}${target.pointerEvents === 'none' ? ' [pointer-events:none]' : ''} · ` +
+        `矩形 ${target.rect.width}×${target.rect.height}@(${target.rect.left},${target.rect.top})`
+      : (outsideX || outsideY
+        ? `目标: 点(${report.point.x},${report.point.y}) 落在页面视口(${probe.innerWidth}×${probe.innerHeight})之外——服务端换算基准偏大`
+        : '目标: 该点下没有元素');
+    const env = `点(${report.point.x},${report.point.y}) · 页面焦点:${probe.hasFocus ? '有' : '无'} · ` +
+      `视口 ${probe.innerWidth}×${probe.innerHeight} vv缩放:${probe.visualViewport?.scale ?? '?'} · 触点:${probe.maxTouchPoints}`;
+    if (elements.calibrationGuideText) elements.calibrationGuideText.textContent = `${summary} · ${env}`;
+    // 完整元素链输出到控制台，便于截图/复制给其他协作者分析。
+    console.log('[tapProbe]', JSON.stringify(report, null, 2));
+    showToast(summary, target && !target.disabled && target.pointerEvents !== 'none' ? 'ok' : 'warn', 6000);
   }
 
   async function refreshCalibrationProbe() {
@@ -3666,7 +3718,7 @@
       elements.computerSourceButton, elements.phoneSourceButton, elements.computerRootsButton, elements.computerParentButton,
       elements.computerRefreshButton, elements.computerClearSelectionButton, elements.computerSortSelect,
       elements.computerSelectFolderButton, elements.phoneFiles, elements.startUploadButton,
-      elements.streamPresetSelect, elements.followDesktopTabsToggle, elements.manualCompatibilitySelect, elements.strictNativeTouchButton, elements.refreshCompatibilityAuditButton, elements.desktopWidthRange,
+      elements.streamPresetSelect, elements.mobileZoomSelect, elements.followDesktopTabsToggle, elements.manualCompatibilitySelect, elements.strictNativeTouchButton, elements.refreshCompatibilityAuditButton, elements.desktopWidthRange,
       elements.fsReloadButton, elements.fsTabsButton, elements.fsKeyboardButton, elements.fsUploadButton, elements.fsStrictInputButton,
       elements.fsCalibrationButton, elements.fsCalibrationTestButton,
       // 浏览历史现为控制者专属（与电脑文件/剪贴板同边界），只读端禁用入口。
@@ -4081,6 +4133,24 @@
       }
     });
     syncAdvancedControls();
+    elements.mobileZoomSelect.value = String(state.mobileZoom);
+    elements.mobileZoomSelect.addEventListener('change', () => {
+      const zoom = [90, 100, 110, 125, 150].includes(Number(elements.mobileZoomSelect.value))
+        ? Number(elements.mobileZoomSelect.value)
+        : 100;
+      state.mobileZoom = zoom;
+      storageSet('edgePhoneMobileZoomV68', String(zoom));
+      if (state.manualCompatibility?.active) {
+        showToast('严格人工模式使用真实桌面窗口，缩放设置将在普通网页生效。', 'info', 2600);
+        return;
+      }
+      if (!state.viewport.mobile) {
+        showToast('缩放设置只影响手机显示模式的网页。', 'info', 2400);
+        return;
+      }
+      scheduleViewport(true, true, 'mobile-zoom');
+      showToast(`手机页面缩放已设为 ${zoom}%`, 'ok', 1800);
+    });
     elements.streamPresetSelect.addEventListener('change', async () => {
       const preset = ['auto', 'economy', 'realtime', 'balanced', 'clear'].includes(elements.streamPresetSelect.value)
         ? elements.streamPresetSelect.value

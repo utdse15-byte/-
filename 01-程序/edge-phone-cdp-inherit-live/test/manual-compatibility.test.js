@@ -231,6 +231,30 @@ async function main() {
     assert.strictEqual(click[0].params.buttons, 0, '悬停移动不应按着按键');
     assert.strictEqual(observed.filter((item) => item.method === 'Input.dispatchTouchEvent' || item.method === 'Input.emulateTouchFromMouseEvent').length, touchBefore);
 
+    // 单位边界回归：dispatchMouseEvent/dispatchTouchEvent 的坐标单位是 CSS
+    // 像素，而客户端上下文携带的 contentDip 在浏览器缩放下是 DIP（此时
+    // pageScaleFactor 仍为 1，帧推导 contentDip÷pageScale 除不掉缩放）。
+    // 模拟浏览器缩放 125%：DIP 680×1056，真实 CSS 视口 544×845（mock 的
+    // Page.getLayoutMetrics）。u=v=0.5 必须落在 CSS 中点 (272, 422.5)，
+    // 而不是 DIP 中点 (340, 528)——后者会把底部按钮推到视口之外。
+    const zoomMouseBefore = observed.filter((item) => item.method === 'Input.dispatchMouseEvent').length;
+    reply = await sendRequest('tap', {
+      x: 340, y: 528, u: 0.5, v: 0.5, inputMode: 'nativeTouch',
+      context: {
+        contentDipWidth: 680, contentDipHeight: 1056,
+        deviceWidth: 680, deviceHeight: 1056,
+        pageScaleFactor: 1,
+        cssVisualViewport: { offsetX: 0, offsetY: 0, clientWidth: 680, clientHeight: 1056, scale: 1 }
+      }
+    });
+    assert.strictEqual(reply.ok, true);
+    await waitFor(() => observed.filter((item) => item.method === 'Input.dispatchMouseEvent').length >= zoomMouseBefore + 3, 5000, '缩放基准点击');
+    const zoomPress = observed.filter((item) => item.method === 'Input.dispatchMouseEvent').slice(zoomMouseBefore)
+      .find((item) => item.params.type === 'mousePressed');
+    assert.ok(zoomPress, '缩放基准点击必须发出 mousePressed');
+    assert.ok(Math.abs(zoomPress.params.x - 272) <= 1, `注入 X 必须是 CSS 像素 272±1（实时视口 544 的中点），实际 ${zoomPress.params.x}`);
+    assert.ok(Math.abs(zoomPress.params.y - 422.5) <= 1, `注入 Y 必须是 CSS 像素 422.5±1（实时视口 845 的中点），实际 ${zoomPress.params.y}`);
+
     reply = await sendRequest('wheel', { x: 180, y: 300, deltaX: 0, deltaY: 160, clearSelection: false });
     assert.strictEqual(reply.ok, true);
     assert.ok(observed.some((item) => item.method === 'Input.dispatchMouseEvent' && item.params?.type === 'mouseWheel'));

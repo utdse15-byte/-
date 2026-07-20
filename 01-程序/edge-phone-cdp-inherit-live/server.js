@@ -3520,21 +3520,85 @@ class CdpController {
     });
   }
 
+  // 点击测试探针（用户当次显式点击触发，一次性、只读、不注入 DOM——与
+  // 环境审计同一边界；严格人工模式下同样仅限用户点击的那一刻执行一次）。
+  // 返回"服务端将要点击的位置"下方的元素链与视口状态，用于诊断"本地
+  // 校准显示无偏移、但真实点击不生效"一类问题（透明遮罩、元素禁用、
+  // 焦点丢失、视口缩放不一致等本地标记看不见的原因）。
+  async probeTapPoint(point) {
+    this.markUserActivation();
+    const px = Math.round(Number(point.x) || 0);
+    const py = Math.round(Number(point.y) || 0);
+    const expression = `(() => {
+      const x = ${px}, y = ${py};
+      const el = document.elementFromPoint(x, y);
+      const chain = [];
+      let node = el;
+      for (let i = 0; node && i < 4; i += 1) {
+        const r = node.getBoundingClientRect();
+        chain.push({
+          tag: node.tagName,
+          id: node.id || '',
+          cls: String(node.className && node.className.baseVal !== undefined ? node.className.baseVal : node.className || '').slice(0, 120),
+          role: node.getAttribute ? (node.getAttribute('role') || '') : '',
+          aria: node.getAttribute ? String(node.getAttribute('aria-label') || '').slice(0, 80) : '',
+          disabled: Boolean(node.disabled),
+          pointerEvents: getComputedStyle(node).pointerEvents,
+          rect: { left: Math.round(r.left), top: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) }
+        });
+        node = node.parentElement;
+      }
+      return {
+        point: { x, y },
+        hasFocus: document.hasFocus(),
+        activeElement: document.activeElement ? document.activeElement.tagName : '',
+        innerWidth,
+        innerHeight,
+        devicePixelRatio,
+        visualViewport: window.visualViewport ? {
+          width: Math.round(visualViewport.width), height: Math.round(visualViewport.height),
+          scale: visualViewport.scale, offsetTop: Math.round(visualViewport.offsetTop), offsetLeft: Math.round(visualViewport.offsetLeft)
+        } : null,
+        maxTouchPoints: navigator.maxTouchPoints,
+        chain
+      };
+    })()`;
+    const evaluated = await this.send('Runtime.evaluate', { expression, returnByValue: true }, { timeout: 5000 });
+    log('info', '用户触发点击测试探针（一次性只读检查）', { x: px, y: py, strict: this.manualCompatibilityActive });
+    return { point: { x: px, y: py }, probe: evaluated?.result?.value || null };
+  }
+
+  // CDP 输入接口的坐标单位并不相同：Input.dispatchMouseEvent 与
+  // Input.dispatchTouchEvent 接收 CSS 像素；Input.emulateTouchFromMouseEvent
+  // （dev 仿真直通路径）接收 DIP。帧推导基准 contentDip ÷ pageScaleFactor
+  // 只除得掉捏合缩放，除不掉浏览器缩放（Ctrl +/-、按站点记忆，缩放时
+  // pageScaleFactor 仍是 1）——严格模式的真实窗口上 DIP 与 CSS 因此可能
+  // 不同，把 DIP 值当 CSS 用会整体偏移、底部溢出视口（elementFromPoint
+  // 返回 null、ChatGPT 底部按钮一排全灭）。CSS 像素的唯一可靠来源是服务端
+  // 实时 Page.getLayoutMetrics；此处返回新鲜且属于当前标签页的实时视口。
+  liveCssViewport() {
+    const metrics = this.layoutMetrics;
+    if (!metrics?.cssVisualViewport?.clientWidth || !metrics?.cssVisualViewport?.clientHeight) return null;
+    if (this.layoutMetricsTargetId && this.target?.id && this.layoutMetricsTargetId !== this.target.id) return null;
+    if (Date.now() - (this.layoutMetricsAt || 0) > 6000) return null;
+    return metrics.cssVisualViewport;
+  }
+
   cssPointForInput(x, y, rawContext = {}, u = null, v = null) {
     const context = this.coordinateContext(rawContext);
     const hasNormalized = hasFiniteOptionalNumber(u) && hasFiniteOptionalNumber(v);
-    // 严格人工模式没有设备仿真：帧内容就是真实窗口的 CSS 视口本身，帧内
-    // 坐标可以直通使用（与实测可靠的 dev 仿真路径同基准）。"归一化 × CSS
-    // 视口"的换算依赖布局指标元数据，真实窗口的刷新时序下可能拿到过期
-    // 基准，曾导致鼠标与原生触摸持续点偏、只打得中大目标（ChatGPT 输入区
-    // 的小按钮全部落空），而直通坐标的 dev 仿真一直正常。
-    if (this.manualCompatibilityActive) {
-      const width = Math.max(1, Number(context.contentDipWidth) || Number(context.deviceWidth) || this.viewport.width);
-      const height = Math.max(1, Number(context.contentDipHeight) || Number(context.deviceHeight) || this.viewport.height);
-      const px = hasNormalized ? clamp(Number(u), 0, 1) * width : (Number(x) || 0);
-      const py = hasNormalized ? clamp(Number(v), 0, 1) * height : (Number(y) || 0);
+    // 归一化坐标是"帧的比例"，与单位无关；乘以实时 CSS 视口得到的就是
+    // dispatchMouseEvent/dispatchTouchEvent 需要的 CSS 像素——对捏合缩放、
+    // 浏览器缩放、仿真页面一律正确。帧上下文换算仅作实时指标不可用时的回退。
+    const live = this.liveCssViewport();
+    if (hasNormalized && live) {
+      const nu = clamp(Number(u), 0, 1);
+      const nv = clamp(Number(v), 0, 1);
       return {
-        point: { x: clampInsideViewport(px, width), y: clampInsideViewport(py, height) },
+        point: {
+          x: clampInsideViewport(nu * live.clientWidth, live.clientWidth),
+          y: clampInsideViewport(nv * live.clientHeight, live.clientHeight)
+        },
         context,
         hasNormalized
       };
@@ -3628,6 +3692,8 @@ class CdpController {
       while (this.touchQueue.length) {
         const command = this.touchQueue.shift();
         await this.ensureConnected(null, { activate: false, reason: 'input' });
+        // 手势起点决定整段手势的坐标基准；开始前确保布局指标新鲜。
+        if (command.eventType === 'start') await this.refreshLayoutMetrics(false).catch(() => {});
         await this.touch(
           command.eventType,
           command.x,
@@ -3818,6 +3884,8 @@ class CdpController {
   async tap(x, y, inputMode = 'nativeTouch', rawContext = {}, u = null, v = null) {
     this.markUserActivation();
     await this.releaseActiveInput('轻点');
+    // 保证换算基准新鲜（内部有 900ms 缓存与单飞，代价极小）。
+    await this.refreshLayoutMetrics(false).catch(() => {});
     const context = this.coordinateContext(rawContext);
     if (context.targetId && this.target?.id && context.targetId !== this.target.id) return;
     const serverRevision = Math.max(0, Number(this.viewport.revision) || 0);
@@ -3864,6 +3932,8 @@ class CdpController {
     deltaU = null,
     deltaV = null
   ) {
+    // 与 tap/手势起点一致：换算基准需新鲜（内部 900ms 缓存与单飞）。
+    await this.refreshLayoutMetrics(false).catch(() => {});
     if (clearSelection) {
       await this.send('Runtime.evaluate', {
         expression: `(() => {
@@ -3883,14 +3953,23 @@ class CdpController {
     const serverRevision = Math.max(0, Number(this.viewport.revision) || 0);
     if (context.viewportRevision && serverRevision && context.viewportRevision !== serverRevision) return;
     if (context.frameEpoch && this.frameEpoch && context.frameEpoch < this.frameEpoch) return;
+    // 与 cssPointForInput 同一基准：滚轮的落点与位移都必须是 CSS 像素。
+    const live = this.liveCssViewport();
     const hasNormalizedPoint = hasFiniteOptionalNumber(u) && hasFiniteOptionalNumber(v);
-    const point = hasNormalizedPoint
-      ? normalizedToCssPoint(Number(u), Number(v), context)
-      : dipToCssPoint(x, y, context);
+    const point = hasNormalizedPoint && live
+      ? {
+        x: clampInsideViewport(clamp(Number(u), 0, 1) * live.clientWidth, live.clientWidth),
+        y: clampInsideViewport(clamp(Number(v), 0, 1) * live.clientHeight, live.clientHeight)
+      }
+      : (hasNormalizedPoint
+        ? normalizedToCssPoint(Number(u), Number(v), context)
+        : dipToCssPoint(x, y, context));
     const hasNormalizedDelta = hasFiniteOptionalNumber(deltaU) && hasFiniteOptionalNumber(deltaV);
-    const delta = hasNormalizedDelta
-      ? normalizedDeltaToCss(Number(deltaU), Number(deltaV), context)
-      : dipDeltaToCss(deltaX, deltaY, context);
+    const delta = hasNormalizedDelta && live
+      ? { deltaX: Number(deltaU) * live.clientWidth, deltaY: Number(deltaV) * live.clientHeight }
+      : (hasNormalizedDelta
+        ? normalizedDeltaToCss(Number(deltaU), Number(deltaV), context)
+        : dipDeltaToCss(deltaX, deltaY, context));
     const params = {
       type: 'mouseWheel',
       x: point.x,
@@ -4473,7 +4552,7 @@ server.on('upgrade', (req, socket, head) => {
 
 const controllerOnlyTypes = new Set([
   'viewport', 'navigate', 'back', 'forward', 'reload', 'touch', 'tap', 'wheel', 'text', 'key', 'selectAll',
-  'mobile', 'streamPreset', 'followDesktopTabs', 'manualCompatibility', 'strictNativeTouch', 'manualCompatibilityAudit', 'selectTarget', 'newTab', 'closeTab', 'navigateHistoryEntry', 'dialog', 'recoverFrame', 'frameQuality', 'frameProblem', 'calibrationMarker', 'calibrationProbe',
+  'mobile', 'streamPreset', 'followDesktopTabs', 'manualCompatibility', 'strictNativeTouch', 'manualCompatibilityAudit', 'selectTarget', 'newTab', 'closeTab', 'navigateHistoryEntry', 'dialog', 'recoverFrame', 'frameQuality', 'frameProblem', 'calibrationMarker', 'calibrationProbe', 'tapProbe',
   'requestUpload', 'cancelUpload', 'computerRoots', 'computerList', 'computerCommit', 'uploadBegin', 'uploadFileBegin', 'uploadChunkAck', 'uploadFileEnd', 'uploadCommit',
   // 浏览历史与电脑文件/剪贴板同属"屏幕画面之外的本机数据"，只读端不可见。
   'browserHistory',
@@ -4728,6 +4807,11 @@ wss.on('connection', (ws, req, info) => {
         case 'calibrationProbe':
           result = await cdp.showCalibrationProbe(message);
           break;
+        case 'tapProbe': {
+          const resolved = cdp.cssPointForInput(message.x, message.y, message.context || {}, message.u, message.v);
+          result = await cdp.probeTapPoint(resolved.point);
+          break;
+        }
         case 'tabs':
           await cdp.publishTabs(ws);
           break;

@@ -188,7 +188,12 @@ assert.ok(html.includes('id="calibrationTestButton"'));
 assert.ok(css.includes('#calibrationLocalMarker'));
 assert.ok(app.includes('Geometry.frameNormalizedToLocal'));
 assert.ok(app.includes('function calibrationTargets'));
-assert.ok(app.includes('此测试完全在手机控制页绘制'));
+// 校准十字仍然完全在手机控制页本地绘制；点击测试可另行发起一次性、只读、
+// 不注入 DOM 的远端元素探针（tapProbe，与环境审计同边界），用于诊断
+// "本地无偏移但真实点击不生效"。
+assert.ok(app.includes('红色十字是当前校准后会发送给 Edge 的位置'));
+assert.ok(app.includes("request('tapProbe'"));
+assert.ok(server.includes('一次性只读检查'));
 assert.ok(!app.includes("request('calibrationMarker'"));
 assert.ok(!app.includes("request('calibrationProbe'"));
 assert.ok(!server.includes('__edge_phone_cdp_calibration_probe__'));
