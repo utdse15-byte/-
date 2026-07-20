@@ -256,6 +256,7 @@ function dipDeltaToCss(deltaX, deltaY, rawContext = {}) {
 }
 
 module.exports = {
+  clampInsideViewport,
   dipDeltaToCss,
   dipToCssPoint,
   normalizeCoordinateContext,

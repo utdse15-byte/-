@@ -19,6 +19,7 @@
     cancelCalibrationButton: $('cancelCalibrationButton'),
     emptyState: $('emptyState'),
     emptyTitle: $('emptyTitle'),
+    emptyReconnectButton: $('emptyReconnectButton'),
     emptyDetail: $('emptyDetail'),
     toast: $('toast'),
     roleBadge: $('roleBadge'),
@@ -411,6 +412,7 @@
     viewportSyncPending: false,
     viewportSyncWatchdogTimer: null,
     viewportSyncReason: '',
+    evictedByPeer: false,
     viewportSettleGeneration: 0,
     viewportSettleTimer: null,
     viewportFallbackTimer: null,
@@ -464,6 +466,8 @@
     elements.emptyDetail.textContent = detail || '';
     const spinner = elements.emptyState.querySelector('.spinner');
     spinner.hidden = !spinning;
+    // 重连按钮只在"被另一页面挤下线"的停驻状态显示（由该分支单独打开）。
+    if (elements.emptyReconnectButton) elements.emptyReconnectButton.hidden = true;
     elements.emptyState.hidden = false;
   }
 
@@ -559,6 +563,11 @@
     clearTimeout(state.reconnectTimer);
     state.reconnectTimer = null;
     state.reconnectDueAt = 0;
+    // 被同机另一个控制页挤下线（4001）后，一切自动路径（重连定时器、切回
+    // 前台、网络恢复）都不得再连——否则两个页面会互相顶掉对方，每秒断连
+    // 一次。只有用户显式点"重新连接"（force）才解除停驻。
+    if (state.evictedByPeer && !force) return;
+    if (force) state.evictedByPeer = false;
     if (!state.token) {
       setOverlay('tokenOverlay', true);
       elements.tokenInput.focus();
@@ -645,7 +654,7 @@
       elements.tokenError.textContent = '连接失败。请确认 IP、端口、防火墙和访问令牌。';
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       if (!isCurrent()) return;
       state.ws = null;
       cancelActiveGesture();
@@ -655,6 +664,16 @@
       rejectAllRequests('控制连接已断开');
       updateRoleUi();
       elements.roleBadge.textContent = '已断开';
+      // 4001 = 同一手机（相同 clientId）的另一个页面实例挤掉了本连接。
+      // 绝不能自动重连：两个实例会以约 1 秒周期互相顶掉对方，表现为
+      // "一直断开又连接"。本页面停下来，把选择权交给用户。
+      if (event?.code === 4001) {
+        state.evictedByPeer = true;
+        showEmpty('控制页已在其他页面打开', '同一手机同时只保留一个控制页。请关闭另一个页面（或旧的浏览器标签/应用），再点下方"重新连接"。', false);
+        if (elements.emptyReconnectButton) elements.emptyReconnectButton.hidden = false;
+        showToast('检测到本机打开了第二个控制页，当前页面已停止自动重连。', 'warn', 0);
+        return;
+      }
       if (state.currentFrame) {
         showToast(navigator.onLine ? '控制连接断开，正在自动重连；当前画面已保留。' : '手机当前离线；当前画面已保留。', 'warn', 0);
       } else {
@@ -3922,6 +3941,10 @@
       updateDiagnosticsText(true);
     });
     $('emptyRecoverButton').addEventListener('click', () => recoverFrame(true));
+    elements.emptyReconnectButton.addEventListener('click', () => {
+      elements.emptyReconnectButton.hidden = true;
+      reconnectNow();
+    });
     $('snapshotButton').addEventListener('click', () => recoverFrame(false));
     $('restartStreamButton').addEventListener('click', () => recoverFrame(true));
     $('syncViewportButton').addEventListener('click', () => {

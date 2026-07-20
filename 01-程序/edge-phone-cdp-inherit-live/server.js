@@ -14,6 +14,7 @@ const { EdgeHistoryService } = require('./lib/edge-history');
 const { EdgeUiaMonitor, chooseTargetFromUia } = require('./lib/windows-edge-uia');
 const { WindowsClipboardBridge } = require('./lib/windows-clipboard');
 const {
+  clampInsideViewport,
   dipDeltaToCss,
   dipToCssPoint,
   normalizeCoordinateContext,
@@ -2387,8 +2388,11 @@ class CdpController {
     const normalized = ['auto', 'always', 'off'].includes(String(mode || '').toLowerCase())
       ? String(mode).toLowerCase()
       : 'auto';
+    // 手机每次连接都会重放该偏好；值没变时不要强制整套重建显示环境
+    // （停/启截屏流、重开截图），否则每次重连都产生一轮画面抖动与日志。
+    const changed = normalized !== this.manualCompatibilityOverride;
     this.manualCompatibilityOverride = normalized;
-    return this.refreshManualCompatibility('phone-setting', true);
+    return this.refreshManualCompatibility('phone-setting', changed);
   }
 
   chooseTarget(targets, targetId = null) {
@@ -3519,6 +3523,22 @@ class CdpController {
   cssPointForInput(x, y, rawContext = {}, u = null, v = null) {
     const context = this.coordinateContext(rawContext);
     const hasNormalized = hasFiniteOptionalNumber(u) && hasFiniteOptionalNumber(v);
+    // 严格人工模式没有设备仿真：帧内容就是真实窗口的 CSS 视口本身，帧内
+    // 坐标可以直通使用（与实测可靠的 dev 仿真路径同基准）。"归一化 × CSS
+    // 视口"的换算依赖布局指标元数据，真实窗口的刷新时序下可能拿到过期
+    // 基准，曾导致鼠标与原生触摸持续点偏、只打得中大目标（ChatGPT 输入区
+    // 的小按钮全部落空），而直通坐标的 dev 仿真一直正常。
+    if (this.manualCompatibilityActive) {
+      const width = Math.max(1, Number(context.contentDipWidth) || Number(context.deviceWidth) || this.viewport.width);
+      const height = Math.max(1, Number(context.contentDipHeight) || Number(context.deviceHeight) || this.viewport.height);
+      const px = hasNormalized ? clamp(Number(u), 0, 1) * width : (Number(x) || 0);
+      const py = hasNormalized ? clamp(Number(v), 0, 1) * height : (Number(y) || 0);
+      return {
+        point: { x: clampInsideViewport(px, width), y: clampInsideViewport(py, height) },
+        context,
+        hasNormalized
+      };
+    }
     const point = hasNormalized
       ? normalizedToCssPoint(Number(u), Number(v), context)
       : dipToCssPoint(x, y, context);
