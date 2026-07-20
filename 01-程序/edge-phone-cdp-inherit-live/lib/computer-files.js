@@ -4,6 +4,13 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+// Windows 上"隐藏"靠文件属性而非点前缀。不读取属性（避免逐项额外系统调用），
+// 但至少把众所周知的系统条目挡在手机文件选择器之外（showHidden 时仍显示）。
+const WINDOWS_SYSTEM_ENTRIES = new Set([
+  '$recycle.bin', 'system volume information', '$winreagent', '$windows.~bt', '$windows.~ws',
+  'pagefile.sys', 'hiberfil.sys', 'swapfile.sys', 'dumpstack.log.tmp', 'desktop.ini', 'thumbs.db'
+]);
+
 function expandEnvironmentPath(value) {
   let text = String(value || '').trim();
   if (!text) return '';
@@ -173,6 +180,7 @@ class ComputerFileService {
     const entries = [];
     for (const dirent of dirents) {
       if (!this.showHidden && dirent.name.startsWith('.')) continue;
+      if (!this.showHidden && WINDOWS_SYSTEM_ENTRIES.has(dirent.name.toLowerCase())) continue;
       const candidate = path.join(selected.resolved, dirent.name);
       try {
         const child = this.resolveAllowed(candidate, 'any');

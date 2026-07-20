@@ -76,7 +76,7 @@ async function main() {
 
   const child = spawn(process.execPath, ['server.js'], {
     cwd: ROOT,
-    env: { ...process.env, PORT: String(httpPort), PHONE_TOKEN: token, IDLE_SHARPEN_ENABLED: '0', CDP_BROWSER_WS: `ws://127.0.0.1:${cdpPort}` },
+    env: { ...process.env, LISTEN_HOST: '127.0.0.1', PORT: String(httpPort), PHONE_TOKEN: token, IDLE_SHARPEN_ENABLED: '0', CDP_BROWSER_WS: `ws://127.0.0.1:${cdpPort}` },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   let out = '';

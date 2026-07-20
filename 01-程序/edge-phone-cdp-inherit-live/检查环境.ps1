@@ -12,7 +12,8 @@ $UiaHelperPath = Join-Path $Here "helpers\edge-uia-monitor.ps1"
 Write-Host "=== 项目版本与 v6.7 策略 ===" -ForegroundColor Cyan
 $VersionPath = Join-Path $Here "VERSION.txt"
 if (Test-Path $VersionPath) { Write-Host ("版本: " + (Get-Content $VersionPath -Raw -Encoding UTF8).Trim()) }
-$FollowEnabled = if ($null -ne $Config.followDesktopTabs) { [bool]$Config.followDesktopTabs } else { $true }
+# 默认值必须与 server.js 的 FOLLOW_DESKTOP_TABS_DEFAULT 一致（false）。
+$FollowEnabled = if ($null -ne $Config.followDesktopTabs) { [bool]$Config.followDesktopTabs } else { $false }
 $FollowStrategy = if ($Config.desktopTabFollowStrategy) { [string]$Config.desktopTabFollowStrategy } else { "uia" }
 $StrictFallback = if ($null -ne $Config.strictRuntimeTabFallback) { [bool]$Config.strictRuntimeTabFallback } else { $false }
 Write-Host "固定代理: $ProxyServer"
@@ -139,11 +140,13 @@ if ($Listener -and -not [string]::IsNullOrWhiteSpace($Token)) {
         [PSCustomObject]@{
             CdpConnected = $Status.cdpConnected
             TargetTitle = if ($Status.target) { [string]$Status.target.title } else { "" }
-            FollowEnabled = $Status.desktopTabFollow.enabled
-            FollowStrategy = $Status.desktopTabFollow.strategy
-            UiaAvailable = $Status.desktopTabFollow.uia.available
-            UiaRunning = $Status.desktopTabFollow.uia.running
-            UiaReason = $Status.desktopTabFollow.uia.reason
+            # /api/status 里标签跟随状态位于 manualCompatibility.desktopTabFollow，
+            # 顶层没有 desktopTabFollow 字段（此前读错路径导致本面板恒为空）。
+            FollowEnabled = $Status.manualCompatibility.desktopTabFollow.enabled
+            FollowStrategy = $Status.manualCompatibility.desktopTabFollow.strategy
+            UiaAvailable = $Status.manualCompatibility.desktopTabFollow.uia.available
+            UiaRunning = $Status.manualCompatibility.desktopTabFollow.uia.running
+            UiaReason = $Status.manualCompatibility.desktopTabFollow.uia.reason
             StrictActive = $Status.manualCompatibility.active
             StrictDomain = $Status.manualCompatibility.domain
             StrictInput = $Status.manualCompatibility.inputProfile

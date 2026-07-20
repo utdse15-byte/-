@@ -114,9 +114,20 @@ Add-Section "Controller and ports" {
         try {
             $Status = Invoke-RestMethod "http://127.0.0.1:$Port/api/status" -Headers @{ Authorization = "Bearer $Token" } -TimeoutSec 4
             if ($Status.endpoint) { $Status.endpoint = ($Status.endpoint -replace '/devtools/browser/.*$', '/devtools/browser/[REDACTED]') }
+            if ($Status.attemptedEndpoint) { $Status.attemptedEndpoint = ($Status.attemptedEndpoint -replace '/devtools/browser/.*$', '/devtools/browser/[REDACTED]') }
             if ($Status.target) {
                 $Status.target.title = "[REDACTED]"
                 $Status.target.url = "[REDACTED]"
+            }
+            # 环境审计缓存与 UIA 前台标签标题同样包含用户正在访问的页面信息。
+            if ($Status.manualCompatibility) {
+                if ($Status.manualCompatibility.audit) {
+                    if ($Status.manualCompatibility.audit.url) { $Status.manualCompatibility.audit.url = "[REDACTED]" }
+                    if ($Status.manualCompatibility.audit.title) { $Status.manualCompatibility.audit.title = "[REDACTED]" }
+                }
+                if ($Status.manualCompatibility.desktopTabFollow.uia.tabTitle) {
+                    $Status.manualCompatibility.desktopTabFollow.uia.tabTitle = "[REDACTED]"
+                }
             }
             foreach ($Phone in @($Status.phones)) {
                 if ($Phone.clientId) { $Phone.clientId = "[REDACTED]" }

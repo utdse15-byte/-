@@ -186,7 +186,7 @@ async function main() {
   const token = 'browser-ui-test-token-123456';
   const controller = spawn(process.execPath, ['server.js'], {
     cwd: ROOT,
-    env: { ...process.env, PORT: String(httpPort), PHONE_TOKEN: token,
+    env: { ...process.env, PORT: String(httpPort), PHONE_TOKEN: token, LISTEN_HOST: '127.0.0.1',
       IDLE_SHARPEN_ENABLED: '0', CDP_BROWSER_WS: `ws://127.0.0.1:${cdpPort}` },
     stdio: ['ignore', 'pipe', 'pipe']
   });

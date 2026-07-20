@@ -1,6 +1,10 @@
 ﻿param(
     [ValidateRange(250, 5000)]
-    [int]$PollMs = 650
+    [int]$PollMs = 650,
+    # 控制器进程 PID。控制器被强制结束（Stop-Process、关闭控制台窗口）时
+    # 本脚本收不到任何通知，必须自行检测父进程消失后退出，否则会以隐藏
+    # 窗口常驻后台持续做 UIA 轮询。0 表示不检查（手动调试时）。
+    [int]$ParentPid = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -82,6 +86,14 @@ function Get-EdgeAddressBarValue {
 $lastFingerprint = ''
 $lastEmitAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - 6000
 while ($true) {
+    if ($ParentPid -gt 0) {
+        try {
+            $parent = [System.Diagnostics.Process]::GetProcessById($ParentPid)
+            if ($parent.HasExited) { exit 0 }
+        } catch {
+            exit 0
+        }
+    }
     $state = [ordered]@{
         available = $true
         edgeForeground = $false

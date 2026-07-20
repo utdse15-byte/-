@@ -66,6 +66,7 @@ async function main() {
     cwd: ROOT,
     env: {
       ...process.env,
+      LISTEN_HOST: '127.0.0.1',
       PORT: String(port),
       PHONE_TOKEN: token,
       IDLE_SHARPEN_ENABLED: '0',

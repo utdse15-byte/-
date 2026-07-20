@@ -35,6 +35,25 @@ assert.strictEqual(normalizeAddress('about:blank'), 'blank');
     tabTitle: '完全不同的标题'
   });
   assert.strictEqual(hostPortMatch?.target?.id, 'x', '省略协议的 host:port 地址必须能按 URL 匹配');
+
+  // 用户在地址栏逐字输入时，一两个字符也可能唯一前缀命中某个标签；
+  // 不完整地址（过短或不含 . / :）不得触发前缀跟随，必须保持当前标签。
+  assert.strictEqual(chooseTargetFromUia(hostPortTargets, {
+    edgeForeground: true,
+    address: 'l',
+    tabTitle: '完全不同的标题'
+  }), null, '单字符地址不得前缀匹配');
+  assert.strictEqual(chooseTargetFromUia(hostPortTargets, {
+    edgeForeground: true,
+    address: 'localh',
+    tabTitle: '完全不同的标题'
+  }), null, '不含 . 或 : 的短输入不得前缀匹配');
+  const typedPrefix = chooseTargetFromUia(hostPortTargets, {
+    edgeForeground: true,
+    address: 'localhost:3000/adm',
+    tabTitle: '完全不同的标题'
+  });
+  assert.strictEqual(typedPrefix?.target?.id, 'x', '足够完整的地址仍可唯一前缀匹配');
 }
 
 let matched = chooseTargetFromUia(targets, {
