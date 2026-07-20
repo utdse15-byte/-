@@ -2296,7 +2296,7 @@ class CdpController {
       await this.startScreencast(true);
       this.scheduleSnapshotIfStreamSilent('manual-compatibility-fallback', sequenceAtStart, 1000);
     }
-    hub.broadcastJson({ type: 'viewport', ...this.viewport });
+    hub.broadcastJson({ type: 'viewport', ...this.viewport, mobile: false });
     this.publishManualCompatibility();
   }
 
@@ -3149,13 +3149,16 @@ class CdpController {
       const currentRevision = Math.max(0, Number(this.viewport.revision) || 0);
       const clientRevision = Math.max(0, Number(requestedRevision) || 0);
       const revision = clientRevision > currentRevision ? clientRevision : (force ? currentRevision + 1 : currentRevision);
-      this.viewport = { ...this.viewport, mobile: false, revision };
+      // 严格模式期间只更新修订号，绝不把 mobile:false 写进存储的视口偏好：
+      // 那会在退出严格模式后让 applyViewport 以桌面布局渲染手机宽度页面
+      // （尺寸异常）。广播里的 mobile:false 仅是当前显示状态。
+      this.viewport = { ...this.viewport, revision };
       // The phone may enter fullscreen or hide its address bar, but the strict-site page keeps
       // one stable real Edge window. Only acknowledge the phone geometry revision;
       // do not rewrite screen metrics or restart the page layout.
       this.screencastViewportRevision = revision;
       this.layoutMetricsViewportRevision = revision;
-      hub.broadcastJson({ type: 'viewport', ...this.viewport });
+      hub.broadcastJson({ type: 'viewport', ...this.viewport, mobile: false });
       this.publishManualCompatibility();
       if (this.isOpen()) {
         this.scheduleLayoutMetricsRefresh(30);
@@ -3191,8 +3194,8 @@ class CdpController {
 
   async setMobile(enabled) {
     if (this.manualCompatibilityActive) {
-      this.viewport.mobile = false;
-      hub.broadcastJson({ type: 'viewport', ...this.viewport });
+      // 同上：严格模式的桌面显示状态只进广播，不改写用户的手机/桌面偏好。
+      hub.broadcastJson({ type: 'viewport', ...this.viewport, mobile: false });
       this.publishManualCompatibility();
       return;
     }

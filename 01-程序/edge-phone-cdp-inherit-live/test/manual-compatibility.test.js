@@ -267,6 +267,11 @@ async function main() {
     assert.strictEqual(reply.ok, true);
     assert.strictEqual(reply.result.active, false);
     await waitFor(() => observed.some((item) => item.method === 'Emulation.setDeviceMetricsOverride'), 7000, '恢复普通手机仿真');
+    // 严格模式期间手机发过 mobile:true 的视口消息（上面第 260 行），退出后
+    // 恢复的仿真必须仍是手机布局：曾有缺陷把严格模式的 mobile:false 显示
+    // 状态写进存储偏好，导致退出后以桌面布局渲染手机宽度页面（尺寸异常）。
+    const restoredMetrics = observed.filter((item) => item.method === 'Emulation.setDeviceMetricsOverride').at(-1);
+    assert.strictEqual(restoredMetrics.params.mobile, true, '退出严格模式必须恢复手机布局仿真，而不是桌面布局');
     const restoreBounds = observed.filter((item) => item.method === 'Browser.setWindowBounds')
       .find((item) => item.params?.bounds?.width === 1280 && item.params?.bounds?.height === 900);
     assert.ok(restoreBounds, '退出模式时应恢复用户原 Edge 窗口尺寸');

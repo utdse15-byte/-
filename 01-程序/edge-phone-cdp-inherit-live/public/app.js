@@ -954,6 +954,10 @@
       showToast(active
         ? '已进入严格人工模式：原 Windows Edge＋固定代理＋桌面鼠标/滚轮。'
         : '已退出严格人工模式，恢复通用手机触摸模式。', 'info', 3400);
+      // 退出严格模式时强制重发一次视口：把手机真实的舞台尺寸与手机/桌面
+      // 偏好重新告知服务端（严格模式期间手机可能旋转过、服务端存的宽高
+      // 已过期），让服务端以正确参数重建仿真，避免切换后页面尺寸异常。
+      if (!active) scheduleViewport(true, true, 'manual-mode-exit');
     }
     updateManualCompatibilityUi();
   }
@@ -1083,11 +1087,17 @@
         renderTabs(state.tabs, state.activeTabId);
         break;
       case 'viewport': {
-        state.viewport = { ...state.viewport, ...message };
+        const incoming = { ...message };
+        // 严格人工模式期间服务端广播的 mobile:false 只是"当前显示桌面环境"
+        // 的状态，不是用户的手机/桌面偏好。绝不能合入本地视口或写进
+        // localStorage，否则退出严格模式后手机会以桌面布局渲染手机宽度的
+        // 页面（尺寸异常），且重启后依旧。
+        if (state.manualCompatibility.active) delete incoming.mobile;
+        state.viewport = { ...state.viewport, ...incoming };
         const revision = Math.max(0, Number(message.revision) || 0);
         state.viewportRevisionCounter = Math.max(state.viewportRevisionCounter, revision);
         if (revision > state.requestedViewportRevision) state.requestedViewportRevision = revision;
-        storageSet('edgePhoneMobileV61', String(Boolean(state.viewport.mobile)));
+        if (!state.manualCompatibility.active) storageSet('edgePhoneMobileV61', String(Boolean(state.viewport.mobile)));
         storageSet('edgePhoneDesktopWidthV61', String(state.viewport.desktopWidth || storedDesktopWidth));
         if (state.viewport.streamPreset) storageSet('edgePhoneStreamPresetV64', state.viewport.streamPreset);
         elements.displayLabel.textContent = state.manualCompatibility.active ? (strictNativeTouchActive() ? '触摸' : '严格') : (state.viewport.mobile ? '手机' : '桌面');
@@ -2697,7 +2707,9 @@
         open.type = 'button';
         open.className = 'browser-history-open';
         open.disabled = state.role !== 'controller';
-        open.title = '在当前 Edge 标签页打开';
+        // 默认在新标签页打开：原地导航会覆盖当前页面（例如把正在使用的
+        // ChatGPT 对话页换掉），代价太高；想替换当前页的用右侧小按钮。
+        open.title = '在新的 Edge 标签页打开（保留当前页面）';
         const title = document.createElement('strong');
         title.textContent = item.title || item.url || '(无标题)';
         const url = document.createElement('small');
@@ -2705,9 +2717,9 @@
         open.append(title, url);
         open.addEventListener('click', async () => {
           try {
-            await request('navigate', { url: item.url }, 20000);
+            await request('newTab', { url: item.url }, 20000);
             setOverlay('tabsOverlay', false);
-            markVisualDemand('global-history-current-tab', 1000);
+            markVisualDemand('global-history-new-tab', 850);
           } catch (error) {
             showToast(error.message, 'error', 3500);
           }
@@ -2717,22 +2729,22 @@
         time.className = 'browser-history-time';
         time.textContent = historyTimeLabel(item.visitTimeMs);
 
-        const newTab = document.createElement('button');
-        newTab.type = 'button';
-        newTab.className = 'browser-history-newtab';
-        newTab.textContent = '+';
-        newTab.title = '在新的 Edge 标签页打开';
-        newTab.disabled = state.role !== 'controller';
-        newTab.addEventListener('click', async () => {
+        const hereTab = document.createElement('button');
+        hereTab.type = 'button';
+        hereTab.className = 'browser-history-newtab';
+        hereTab.textContent = '此页';
+        hereTab.title = '在当前 Edge 标签页打开（替换当前页面）';
+        hereTab.disabled = state.role !== 'controller';
+        hereTab.addEventListener('click', async () => {
           try {
-            await request('newTab', { url: item.url }, 20000);
+            await request('navigate', { url: item.url }, 20000);
             setOverlay('tabsOverlay', false);
-            markVisualDemand('global-history-new-tab', 850);
+            markVisualDemand('global-history-current-tab', 1000);
           } catch (error) {
             showToast(error.message, 'error', 3500);
           }
         });
-        row.append(open, time, newTab);
+        row.append(open, time, hereTab);
         elements.browserHistoryList.append(row);
       }
     }
