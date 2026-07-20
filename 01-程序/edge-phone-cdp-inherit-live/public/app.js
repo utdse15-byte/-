@@ -258,9 +258,9 @@
   const storedQuality = clamp(Number(storageGet('edgePhoneQualityV6', '72')) || 72, 35, 92);
   const storedMobile = storageGet('edgePhoneMobileV61', 'true') !== 'false';
   const storedDesktopWidth = clamp(Number(storageGet('edgePhoneDesktopWidthV61', '1280')) || 1280, 800, 2560);
-  // 手机页面缩放：把仿真视口按比例缩小，同屏显示即等比放大内容（与
-  // Edge 的 Ctrl+ 缩放同效）。只影响普通手机仿真页面；严格人工模式保持
-  // 真实桌面窗口（其缩放由 Edge 自身按站点记忆）。
+  // 页面缩放：把仿真视口按比例缩小，同屏显示即等比放大内容（与
+  // Edge 的 Ctrl+ 缩放同效）。手机与桌面两种显示模式的普通仿真页面都
+  // 生效；严格人工模式保持真实桌面窗口（其缩放由 Edge 自身按站点记忆）。
   const storedMobileZoom = [90, 100, 110, 125, 150].includes(Number(storageGet('edgePhoneMobileZoomV68', '100')))
     ? Number(storageGet('edgePhoneMobileZoomV68', '100'))
     : 100;
@@ -1803,9 +1803,12 @@
     if (size.rawWidth < 100 || size.rawHeight < 100) return false;
     const mobile = Boolean(state.viewport.mobile);
     const desktopWidth = clamp(Number(state.viewport.desktopWidth) || storedDesktopWidth, 800, 2560);
-    // 手机页面缩放：仿真视口按比例缩小，同屏显示即等比放大内容。
+    // 页面缩放：仿真视口按比例缩小，同屏显示即等比放大内容。手机模式除
+    // 手机屏幕尺寸，桌面模式除"桌面网页宽度"，两种显示模式同一套倍率。
     const zoom = clamp((Number(state.mobileZoom) || 100) / 100, 0.9, 1.5);
-    const width = mobile ? Math.max(240, Math.round(size.width / zoom)) : desktopWidth;
+    const width = mobile
+      ? Math.max(240, Math.round(size.width / zoom))
+      : clamp(Math.round(desktopWidth / zoom), 480, 2560);
     const height = mobile
       ? Math.max(320, Math.round(size.height / zoom))
       : clamp(Math.round(width * size.rawHeight / Math.max(1, size.rawWidth)), 480, 2560);
@@ -4144,12 +4147,8 @@
         showToast('严格人工模式使用真实桌面窗口，缩放设置将在普通网页生效。', 'info', 2600);
         return;
       }
-      if (!state.viewport.mobile) {
-        showToast('缩放设置只影响手机显示模式的网页。', 'info', 2400);
-        return;
-      }
-      scheduleViewport(true, true, 'mobile-zoom');
-      showToast(`手机页面缩放已设为 ${zoom}%`, 'ok', 1800);
+      scheduleViewport(true, true, 'page-zoom');
+      showToast(`页面缩放已设为 ${zoom}%`, 'ok', 1800);
     });
     elements.streamPresetSelect.addEventListener('change', async () => {
       const preset = ['auto', 'economy', 'realtime', 'balanced', 'clear'].includes(elements.streamPresetSelect.value)

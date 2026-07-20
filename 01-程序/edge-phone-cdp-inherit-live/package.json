@@ -1,6 +1,6 @@
 {
   "name": "edge-phone-cdp-controller",
-  "version": "6.8.3",
+  "version": "6.8.4",
   "private": true,
   "description": "Control an existing Windows Microsoft Edge profile from Android through CDP, with a strict human-operated mode for ChatGPT and Claude, fixed-proxy inheritance, Windows UI Automation tab sync, resilient screen streaming, optional native touch, local-only calibration overlays, history, and computer-file upload.",
   "main": "server.js",
