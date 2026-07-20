@@ -68,6 +68,23 @@ try {
   assert.throws(() => service.validateSelection([nested], { directory: false }), /请选择电脑上的文件/);
   assert.throws(() => service.validateSelection([path.join(root, 'alpha.txt'), path.join(nested, 'beta.bin')], { multiple: false }), /只允许选择一个文件/);
 
+  // 显式配置的根全部无效时必须"失败关闭"：不得静默放宽到整个用户目录。
+  const failClosed = new ComputerFileService({ roots: [path.join(base, 'no-such-dir-a'), path.join(base, 'no-such-dir-b')] });
+  assert.strictEqual(failClosed.listRoots().length, 0, '无效的显式根不得回退到用户目录');
+  assert.throws(() => failClosed.resolveAllowed(root), /不可用|没有允许/);
+
+  // 嵌套根重叠时按"最长匹配"归属：nested 里的路径应归属 nested 根而非 root。
+  const nestedService = new ComputerFileService({ roots: [root, nested] });
+  const nestedResolved = nestedService.resolveAllowed(path.join(nested, 'beta.bin'), 'file');
+  assert.strictEqual(nestedResolved.root.path, path.resolve(nested), '重叠根必须选择最具体的授权边界');
+
+  // 重复选择先去重再检查数量上限。
+  const dupSelection = service.validateSelection(
+    [path.join(root, 'alpha.txt'), path.join(root, 'alpha.txt'), path.join(root, 'alpha.txt')],
+    { multiple: true, directory: false, maxFiles: 2 }
+  );
+  assert.strictEqual(dupSelection.length, 1, '重复路径应在限额检查前去重');
+
   console.log('computer-files.test.js: OK');
 } finally {
   fs.rmSync(base, { recursive: true, force: true });

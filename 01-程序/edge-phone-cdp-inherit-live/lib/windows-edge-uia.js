@@ -27,11 +27,16 @@ function normalizeAddress(value) {
     /^(about|edge|chrome|devtools|data|javascript|mailto|view-source):/i.test(text);
   try {
     const parsed = new URL(hasScheme ? text : `https://${text}`);
+    // 不透明协议（about:/edge:/data: 等）保留协议前缀作为身份的一部分，
+    // 避免 about:blank 与主机名恰为 "blank" 的 https 页面归一化后相撞。
+    // http/https 仍然合并（地址栏经常省略协议，无法区分）。
+    const protocol = parsed.protocol.toLowerCase();
+    const schemePrefix = protocol === 'http:' || protocol === 'https:' ? '' : protocol;
     const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
     const port = parsed.port ? `:${parsed.port}` : '';
     const pathname = (parsed.pathname || '/').replace(/\/{2,}/g, '/').replace(/\/$/, '') || '/';
     const search = parsed.search || '';
-    return `${host}${port}${pathname === '/' ? '' : pathname}${search}`.toLowerCase();
+    return `${schemePrefix}${host}${port}${pathname === '/' ? '' : pathname}${search}`.toLowerCase();
   } catch {
     return text
       .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
@@ -64,9 +69,12 @@ function chooseTargetFromUia(targets, uiaState = {}, options = {}) {
     // "." 或 ":"）的值才允许前缀匹配；不确定时保持当前标签。
     const plausibleAddress = address.length >= 6 && /[.:]/.test(address);
     if (plausibleAddress) {
+      // 前缀必须终止在路径段/查询边界，避免 /foo 匹配到 /foobar。
+      const boundaryPrefix = (longer, shorter) => longer.startsWith(shorter) &&
+        (longer.length === shorter.length || ['/', '?', '&'].includes(longer[shorter.length]));
       const prefixUrl = candidates.filter((target) => {
         const candidate = normalizeAddress(target.url);
-        return candidate && (candidate.startsWith(address) || address.startsWith(candidate));
+        return candidate && (boundaryPrefix(candidate, address) || boundaryPrefix(address, candidate));
       });
       if (prefixUrl.length === 1) return { target: prefixUrl[0], confidence: 'url-prefix' };
     }
@@ -183,6 +191,12 @@ class EdgeUiaMonitor extends EventEmitter {
     this.stdoutBuffer += String(chunk || '');
     const lines = this.stdoutBuffer.split(/\r?\n/);
     this.stdoutBuffer = lines.pop() || '';
+    // 正常输出是单行 JSON（远小于 64KB）。异常的超长无换行记录不能无限
+    // 累积内存（stderr 已有 8000 字符上限,stdout 同样要有界）。
+    if (this.stdoutBuffer.length > 65536) {
+      this.logger('warn', '丢弃过长且未换行的 UI Automation 输出', { length: this.stdoutBuffer.length });
+      this.stdoutBuffer = '';
+    }
     for (const line of lines) {
       const trimmed = line.trim().replace(/^\uFEFF/, '');
       if (!trimmed) continue;

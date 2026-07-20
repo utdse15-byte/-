@@ -16,6 +16,19 @@ function Get-ConfigValue {
     return $Property.Value
 }
 
+function ConvertTo-StrictBool {
+    # PowerShell 的 [bool] 把任何非空字符串都当 $true，写成 "false" 的配置会被
+    # 悄悄当成开启。只接受明确写法，其余报错并退回默认值。
+    param($Value, [bool]$Default, [string]$Name)
+    if ($null -eq $Value) { return $Default }
+    if ($Value -is [bool]) { return $Value }
+    $Text = ([string]$Value).Trim().ToLowerInvariant()
+    if ($Text -in @('1', 'true', 'yes', 'on')) { return $true }
+    if ($Text -in @('0', 'false', 'no', 'off')) { return $false }
+    Write-Host "警告: 配置 $Name 的值 '$Value' 不是有效布尔值，已使用默认值 $Default。请写 true/false。" -ForegroundColor Yellow
+    return $Default
+}
+
 function Stop-OldControllerOnPort {
     param([int]$Port)
     $Connections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
@@ -104,10 +117,10 @@ $ProxyServer = [string](Get-ConfigValue $Config "proxyServer" "http://127.0.0.1:
 $HostResolverRules = [string](Get-ConfigValue $Config "hostResolverRules" "MAP * 0.0.0.0, EXCLUDE 127.0.0.1")
 $ControllerPort = [int](Get-ConfigValue $Config "controllerPort" 8765)
 Stop-OldControllerOnPort -Port $ControllerPort
-$CloseExistingEdge = [bool](Get-ConfigValue $Config "closeExistingEdge" $true)
-$OpenRemoteDebuggingPage = [bool](Get-ConfigValue $Config "openRemoteDebuggingPage" $true)
+$CloseExistingEdge = ConvertTo-StrictBool (Get-ConfigValue $Config "closeExistingEdge" $true) $true "closeExistingEdge"
+$OpenRemoteDebuggingPage = ConvertTo-StrictBool (Get-ConfigValue $Config "openRemoteDebuggingPage" $true) $true "openRemoteDebuggingPage"
 $InitialUrl = [string](Get-ConfigValue $Config "initialUrl" "about:blank")
-$AutoRestartEdge = [bool](Get-ConfigValue $Config "autoRestartEdge" $true)
+$AutoRestartEdge = ConvertTo-StrictBool (Get-ConfigValue $Config "autoRestartEdge" $true) $true "autoRestartEdge"
 $EdgeRestartCooldownSeconds = [int](Get-ConfigValue $Config "edgeRestartCooldownSeconds" 8)
 $EdgeDebugPromptCooldownSeconds = [int](Get-ConfigValue $Config "edgeDebugPromptCooldownSeconds" 30)
 

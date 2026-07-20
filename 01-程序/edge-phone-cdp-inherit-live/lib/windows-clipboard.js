@@ -59,7 +59,17 @@ class WindowsClipboardBridge {
   }
 
   available() {
-    return this.platform === 'win32' || Boolean(this.getCommand || this.setCommand);
+    return this.canRead() || this.canWrite();
+  }
+
+  // 能力按方向区分：非 Windows 主机只配置了读取命令时不得宣称可写入
+  // （反之亦然），否则另一方向会去调用不存在的 powershell.exe。
+  canRead() {
+    return this.platform === 'win32' || Boolean(this.getCommand);
+  }
+
+  canWrite() {
+    return this.platform === 'win32' || Boolean(this.setCommand);
   }
 
   defaultGetCommand() {
@@ -90,7 +100,7 @@ class WindowsClipboardBridge {
 
   // 读取电脑剪贴板文本。仅限用户当次显式触发。
   async read() {
-    if (!this.available()) throw new Error('剪贴板桥仅支持 Windows 电脑端。');
+    if (!this.canRead()) throw new Error('剪贴板读取仅支持 Windows 电脑端（或已配置替代读取命令时）。');
     const command = this.getCommand || this.defaultGetCommand();
     return this.exclusive(async () => {
       const text = await runCommand(command, {
@@ -107,7 +117,7 @@ class WindowsClipboardBridge {
 
   // 把手机端文本写入电脑剪贴板。仅限用户当次显式触发。
   async write(text) {
-    if (!this.available()) throw new Error('剪贴板桥仅支持 Windows 电脑端。');
+    if (!this.canWrite()) throw new Error('剪贴板写入仅支持 Windows 电脑端（或已配置替代写入命令时）。');
     const value = String(text ?? '');
     if (!value) throw new Error('要写入电脑剪贴板的内容为空。');
     if (value.length > this.maxChars) {
