@@ -5,6 +5,9 @@ const MAX_HEADER_BYTES = 1024 * 1024;
 
 function makeFramePacket(buffer, metadata) {
   if (!Buffer.isBuffer(buffer)) buffer = Buffer.from(buffer);
+  // 与 parseFramePacket 保持同一不变式：不存在"只有头没有图像"的合法帧。
+  // 编码端造得出来而解码端拒绝的包等于协议自相矛盾。
+  if (buffer.length === 0) throw new Error('帧图像数据不能为空');
   const header = Buffer.from(JSON.stringify(metadata || {}), 'utf8');
   if (header.length === 0 || header.length > MAX_HEADER_BYTES) throw new Error('帧元数据大小无效');
   const packet = Buffer.allocUnsafe(8 + header.length + buffer.length);

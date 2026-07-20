@@ -160,14 +160,16 @@ function almost(actual, expected, tolerance = 1e-6) {
 }
 
 {
+  // 旧版 DIP 坐标与归一化路径同样做半像素内缩：恰好等于宽/高的坐标位于
+  // 最后一个像素之外，必须收进视口内缘，0 同理收进 0.5。
   const point = dipToCssPoint(9999, -10, {
     pageScaleFactor: 2,
     contentDipWidth: 400,
     contentDipHeight: 800,
     cssVisualViewport: { clientWidth: 200, clientHeight: 400, scale: 2 }
   });
-  assert.strictEqual(point.x, 200);
-  assert.strictEqual(point.y, 0);
+  assert.strictEqual(point.x, 199.5);
+  assert.strictEqual(point.y, 0.5);
 }
 
 console.log('input-coordinates.test.js: OK');

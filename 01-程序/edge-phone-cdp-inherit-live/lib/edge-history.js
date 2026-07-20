@@ -48,7 +48,10 @@ function copyIfExists(source, destination) {
 
 class EdgeHistoryService {
   constructor(options = {}) {
-    this.userDataDir = path.resolve(String(options.userDataDir || ''));
+    // path.resolve('') 会落到进程工作目录：缺失的 userDataDir 必须显式判无效，
+    // 不能让历史服务去检查一个无关目录。
+    const rawUserDataDir = String(options.userDataDir || '').trim();
+    this.userDataDir = rawUserDataDir ? path.resolve(rawUserDataDir) : '';
     this.configuredProfileDirectory = normalizeProfileDirectory(options.profileDirectory);
     this.maxLimit = clampInt(options.maxLimit, 20, 500, 200);
     this.busyTimeoutMs = clampInt(options.busyTimeoutMs, 100, 10000, 2500);
@@ -218,12 +221,16 @@ class EdgeHistoryService {
       }
     }
 
+    // WAL 模式下最近写入可能只落在 -wal 文件上，主库 mtime 不变；
+    // 更新时间取两者较新值，否则"数据库未变化"的判断会漏掉新访问记录。
     const stat = fs.statSync(filePath);
+    let updatedAt = stat.mtimeMs;
+    try { updatedAt = Math.max(updatedAt, fs.statSync(`${filePath}-wal`).mtimeMs); } catch {}
     return {
       profileDirectory,
       ...result,
       source,
-      databaseUpdatedAt: Math.round(stat.mtimeMs)
+      databaseUpdatedAt: Math.round(updatedAt)
     };
   }
 }

@@ -232,9 +232,11 @@ function normalizedDeltaToCss(deltaU, deltaV, rawContext = {}) {
 
 function dipToCssPoint(x, y, rawContext = {}) {
   const resolved = resolveNativeScales(rawContext);
+  // 与归一化路径同样保持半像素内缩：恰好等于 width/height 的坐标位于
+  // 最后一个像素之外，会落空 Chromium 的命中测试。
   return {
-    x: clamp(finite(x, 0) / resolved.scaleX, 0, resolved.cssWidth),
-    y: clamp(finite(y, 0) / resolved.scaleY, 0, resolved.cssHeight),
+    x: clampInsideViewport(finite(x, 0) / resolved.scaleX, resolved.cssWidth),
+    y: clampInsideViewport(finite(y, 0) / resolved.scaleY, resolved.cssHeight),
     scaleX: resolved.scaleX,
     scaleY: resolved.scaleY,
     cssWidth: resolved.cssWidth,

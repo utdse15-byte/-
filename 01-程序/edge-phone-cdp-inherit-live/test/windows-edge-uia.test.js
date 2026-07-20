@@ -23,7 +23,9 @@ assert.strictEqual(normalizeTabTitle('(2) Claude - Microsoft Edge'), 'claude');
 assert.strictEqual(normalizeAddress('localhost:3000/admin/panel'), 'localhost:3000/admin/panel');
 assert.strictEqual(normalizeAddress('http://localhost:3000/admin/panel'), 'localhost:3000/admin/panel');
 assert.strictEqual(normalizeAddress('nas:5000/index'), 'nas:5000/index');
-assert.strictEqual(normalizeAddress('about:blank'), 'blank');
+// 不透明协议保留前缀：about:blank 不得与主机名恰为 "blank" 的网页相撞。
+assert.strictEqual(normalizeAddress('about:blank'), 'about:blank');
+assert.notStrictEqual(normalizeAddress('about:blank'), normalizeAddress('https://blank/'));
 {
   const hostPortTargets = [
     { id: 'x', title: 'Admin', url: 'http://localhost:3000/admin/panel', controllable: true },
@@ -48,12 +50,23 @@ assert.strictEqual(normalizeAddress('about:blank'), 'blank');
     address: 'localh',
     tabTitle: '完全不同的标题'
   }), null, '不含 . 或 : 的短输入不得前缀匹配');
-  const typedPrefix = chooseTargetFromUia(hostPortTargets, {
+  // 前缀必须终止在路径段边界：输入中途的 /adm 不得匹配 /admin/panel。
+  assert.strictEqual(chooseTargetFromUia(hostPortTargets, {
     edgeForeground: true,
     address: 'localhost:3000/adm',
     tabTitle: '完全不同的标题'
+  }), null, '非边界前缀（输入中途）不得匹配');
+  // 地址栏省略查询串是 Edge 的真实行为：边界处的前缀仍可唯一匹配。
+  const queryTargets = [
+    { id: 'q', title: 'Query', url: 'http://localhost:3000/admin/panel?tab=2', controllable: true },
+    { id: 'y2', title: 'Example', url: 'https://example.com/', controllable: true }
+  ];
+  const boundaryPrefix = chooseTargetFromUia(queryTargets, {
+    edgeForeground: true,
+    address: 'localhost:3000/admin/panel',
+    tabTitle: '完全不同的标题'
   });
-  assert.strictEqual(typedPrefix?.target?.id, 'x', '足够完整的地址仍可唯一前缀匹配');
+  assert.strictEqual(boundaryPrefix?.target?.id, 'q', '省略查询串的完整路径应在边界处唯一匹配');
 }
 
 let matched = chooseTargetFromUia(targets, {

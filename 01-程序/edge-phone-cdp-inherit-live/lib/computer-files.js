@@ -115,9 +115,11 @@ class ComputerFileService {
     this.maxEntries = Math.max(50, Math.min(5000, Number(options.maxEntries) || 1000));
     this.defaultSort = normalizeSort(options.defaultSort || 'modified-desc');
     const configured = Array.isArray(options.roots) ? options.roots.map(expandEnvironmentPath).filter(Boolean) : [];
-    const candidates = configured.length ? configured : discoverDefaultRoots();
+    const explicitlyConfigured = configured.length > 0;
+    const candidates = explicitlyConfigured ? configured : discoverDefaultRoots();
     const seen = new Set();
     this.roots = [];
+    this.rootsUnavailableReason = '';
 
     for (const candidate of candidates) {
       try {
@@ -137,8 +139,15 @@ class ComputerFileService {
     }
 
     if (!this.roots.length) {
-      const fallback = path.resolve(os.homedir());
-      this.roots.push({ label: '用户目录', path: fallback, realPath: fallback });
+      if (explicitlyConfigured) {
+        // 显式配置了 computerFileRoots 但全部无效（盘符离线、目录被删等）时
+        // 必须"失败关闭"：授权范围是操作者刻意收窄的，绝不能静默放宽到
+        // 整个用户目录。保持空根列表，浏览请求会得到明确错误。
+        this.rootsUnavailableReason = '配置的 computerFileRoots 当前全部不可用（目录不存在或无法访问）；请修正配置或恢复目录后重启控制器。';
+      } else {
+        const fallback = path.resolve(os.homedir());
+        this.roots.push({ label: '用户目录', path: fallback, realPath: fallback });
+      }
     }
   }
 
@@ -151,6 +160,9 @@ class ComputerFileService {
     if (!value || value.includes('\0')) throw new Error('电脑文件路径无效。');
     if (!path.isAbsolute(value)) throw new Error('电脑文件路径必须是绝对路径。');
 
+    if (!this.roots.length) {
+      throw new Error(this.rootsUnavailableReason || '当前没有允许浏览的电脑位置。');
+    }
     const requested = path.resolve(value);
     let real;
     try {
@@ -159,9 +171,11 @@ class ComputerFileService {
       throw new Error('电脑文件或文件夹不存在，可能已被移动或删除。');
     }
     const resolved = path.resolve(real);
+    // 多个根都包含该路径时取"最长匹配"（最具体的授权边界），
+    // 否则根标签与上级目录导航会被最宽的根接管。
     const root = this.roots
       .filter((item) => isWithin(canonical(resolved), canonical(item.realPath)))
-      .sort((a, b) => canonical(a.realPath).length - canonical(b.realPath).length)[0];
+      .sort((a, b) => canonical(b.realPath).length - canonical(a.realPath).length)[0];
     if (!root) throw new Error('该路径不在允许浏览的电脑位置中。');
 
     let stat;
@@ -223,13 +237,16 @@ class ComputerFileService {
     const directoryMode = Boolean(options.directory);
     const multiple = Boolean(options.multiple);
     if (!paths.length) throw new Error(directoryMode ? '请选择一个电脑文件夹。' : '请选择电脑上的文件。');
-    if (paths.length > maxFiles) throw new Error(`一次最多选择 ${maxFiles} 个电脑文件。`);
-    if (!multiple && !directoryMode && paths.length > 1) throw new Error('该网页上传框只允许选择一个文件。');
-    if (directoryMode && paths.length > 1) throw new Error('该网页上传框一次只接受一个文件夹。');
+    // 先做无需触盘的规范化去重，再检查数量上限：重复的合法选择不应
+    // 因去重前的原始长度而被拒绝。（软链接别名由下方 resolve 后再去重。）
+    const uniquePaths = [...new Map(paths.map((item) => [canonical(item), item])).values()];
+    if (uniquePaths.length > maxFiles) throw new Error(`一次最多选择 ${maxFiles} 个电脑文件。`);
+    if (!multiple && !directoryMode && uniquePaths.length > 1) throw new Error('该网页上传框只允许选择一个文件。');
+    if (directoryMode && uniquePaths.length > 1) throw new Error('该网页上传框一次只接受一个文件夹。');
 
     const seen = new Set();
     const files = [];
-    for (const rawPath of paths) {
+    for (const rawPath of uniquePaths) {
       const item = this.resolveAllowed(rawPath, directoryMode ? 'directory' : 'file');
       const key = canonical(item.resolved);
       if (seen.has(key)) continue;

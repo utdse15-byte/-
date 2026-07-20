@@ -51,10 +51,14 @@ Add-Section "System" {
     if (Get-Command npm -ErrorAction SilentlyContinue) { "npm: " + (& npm -v) }
 }
 
-Add-Section "Configuration (token redacted)" {
+Add-Section "Configuration (secrets redacted)" {
     if (-not (Test-Path $ConfigPath)) { "config.json not found"; return }
     $RawConfig = Get-Content $ConfigPath -Raw -Encoding UTF8
-    $RawConfig = $RawConfig -replace '(?i)("accessToken"\s*:\s*")[^"]*(")', '$1[REDACTED]$2'
+    # 凡键名含 token/password/secret/credential/key 的字符串值一律遮蔽，
+    # 不再只点名 accessToken——自定义键里的机密同样不能进入诊断包。
+    $RawConfig = $RawConfig -replace '(?i)("[^"]*(?:token|password|secret|credential|key)[^"]*"\s*:\s*")[^"]*(")', '$1[REDACTED]$2'
+    # 自定义剪贴板命令可能携带机密参数，整体遮蔽（保留键名便于排障）。
+    $RawConfig = $RawConfig -replace '(?i)("clipboard(?:Get|Set)Command"\s*:\s*)\[[^\]]*\]', '$1"[REDACTED]"'
     $RawConfig = $RawConfig -replace '(?i)(://)[^/@\s]+@', '$1[REDACTED]@'
     $RawConfig
 }
@@ -99,7 +103,8 @@ Add-Section "Edge and remote debugging" {
             Format-Table -AutoSize
         "Representative Edge command lines:"
         Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" -ErrorAction SilentlyContinue |
-            Select-Object -First 6 ProcessId, ParentProcessId, CommandLine |
+            Select-Object -First 6 ProcessId, ParentProcessId,
+                @{Name = 'CommandLine'; Expression = { ([string]$_.CommandLine) -replace '(?i)(://)[^/@\s]+@', '$1[REDACTED]@' }} |
             Format-List
     } else {
         "NO msedge.exe PROCESS"

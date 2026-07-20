@@ -3638,6 +3638,9 @@
       elements.streamPresetSelect, elements.followDesktopTabsToggle, elements.manualCompatibilitySelect, elements.strictNativeTouchButton, elements.refreshCompatibilityAuditButton, elements.desktopWidthRange,
       elements.fsReloadButton, elements.fsTabsButton, elements.fsKeyboardButton, elements.fsUploadButton, elements.fsStrictInputButton,
       elements.fsCalibrationButton, elements.fsCalibrationTestButton,
+      // 浏览历史现为控制者专属（与电脑文件/剪贴板同边界），只读端禁用入口。
+      elements.browserHistoryModeButton, elements.browserHistorySearchInput,
+      elements.browserHistoryRefreshButton, elements.browserHistoryMoreButton,
       ...document.querySelectorAll('[data-key]')
     ];
 
@@ -3750,6 +3753,14 @@
       const value = $('clipboardText').value;
       if (!value) {
         showToast('文本框为空，先粘贴要发送的内容。', 'warn', 2500);
+        return;
+      }
+      // 服务端 WebSocket 单条消息有字节上限；多字节文本（中文/表情）按
+      // 字节预检，超限时给出明确提示而不是让连接被底层直接断开。
+      const encodedBytes = new TextEncoder().encode(value).length;
+      if (encodedBytes > 6 * 1024 * 1024) {
+        showToast('文本过大（超过 6 MB），请分段发送。', 'error', 4000);
+        status.textContent = '文本过大，未发送。';
         return;
       }
       status.textContent = '正在写入电脑剪贴板…';

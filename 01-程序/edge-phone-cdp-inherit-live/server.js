@@ -22,7 +22,7 @@ const {
   resolveNativeScales
 } = require('./lib/input-coordinates');
 
-const VERSION = '6.8.1';
+const VERSION = '6.8.2';
 const SERVICE_ID = 'edge-phone-cdp-controller';
 const ROOT_DIR = __dirname;
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
@@ -33,10 +33,23 @@ const TOKEN_PATH = path.join(DATA_DIR, 'access-token.txt');
 const UPLOAD_ROOT = path.join(os.tmpdir(), 'edge-phone-cdp-uploads');
 
 function readJsonFile(filePath, fallback = {}) {
+  // \u53EA\u6709"\u6587\u4EF6\u4E0D\u5B58\u5728"\u624D\u5141\u8BB8\u56DE\u9000\u5230\u9ED8\u8BA4\u503C\u3002\u64CD\u4F5C\u8005\u63D0\u4F9B\u4E86\u914D\u7F6E\u5374\u56E0\u8BED\u6CD5\u9519\u8BEF\u3001
+  // \u6743\u9650\u6216\u534A\u622A\u5199\u5165\u88AB\u9759\u9ED8\u5FFD\u7565\uFF0C\u4F1A\u8BA9\u63A7\u5236\u5668\u5E26\u7740\u9ED8\u8BA4\u7684\u5B89\u5168/\u6587\u4EF6/\u6D41\u8BBE\u7F6E\u542F\u52A8\uFF0C
+  // \u6BD4\u6E05\u6670\u5730\u62D2\u7EDD\u542F\u52A8\u5371\u9669\u5F97\u591A\u3002
+  let raw;
   try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, ''));
-  } catch {
-    return fallback;
+    raw = fs.readFileSync(filePath, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return fallback;
+    console.error(`\u65E0\u6CD5\u8BFB\u53D6\u914D\u7F6E\u6587\u4EF6 ${filePath}\uFF1A${error.message}`);
+    process.exit(1);
+  }
+  try {
+    return JSON.parse(raw.replace(/^\uFEFF/, ''));
+  } catch (error) {
+    console.error(`\u914D\u7F6E\u6587\u4EF6 ${filePath} \u4E0D\u662F\u6709\u6548\u7684 JSON\uFF1A${error.message}`);
+    console.error('\u8BF7\u4FEE\u6B63\u8BE5\u6587\u4EF6\uFF08\u6216\u5220\u9664\u5B83\u4EE5\u4F7F\u7528\u9ED8\u8BA4\u914D\u7F6E\uFF09\u540E\u91CD\u65B0\u542F\u52A8\u63A7\u5236\u5668\u3002');
+    process.exit(1);
   }
 }
 
@@ -49,7 +62,13 @@ function numberSetting(value, fallback, min, max) {
 function boolSetting(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
   if (typeof value === 'boolean') return value;
-  return !/^(0|false|no|off)$/i.test(String(value));
+  const text = String(value).trim().toLowerCase();
+  // 只接受明确的布尔写法。以前"除 0/false/no/off 外全为真"会把手滑写错的
+  // "flase"、"disabled" 之类静默当成开启。
+  if (/^(1|true|yes|on)$/.test(text)) return true;
+  if (/^(0|false|no|off)$/.test(text)) return false;
+  console.warn(`无法识别的布尔配置值：“${String(value)}”，已使用默认值 ${fallback}。请写 true/false。`);
+  return fallback;
 }
 
 function stringListSetting(value, fallback = []) {
@@ -302,14 +321,35 @@ function resolveAccessToken() {
   try {
     const persisted = fs.readFileSync(TOKEN_PATH, 'utf8').trim();
     if (persisted.length >= 16) return persisted;
-  } catch {}
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.error(`无法读取访问令牌文件 ${TOKEN_PATH}：${error.message}`);
+      console.error('请修复该文件的读取权限（或删除它以重新生成）后再启动。');
+      process.exit(1);
+    }
+  }
   const generated = crypto.randomBytes(18).toString('base64url');
   try {
     fs.writeFileSync(TOKEN_PATH, `${generated}\r\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-  } catch {
-    try { fs.writeFileSync(TOKEN_PATH, `${generated}\r\n`, { encoding: 'utf8', mode: 0o600 }); } catch {}
+    return generated;
+  } catch (error) {
+    if (error.code === 'EEXIST') {
+      // 并发启动时另一个进程先写入了令牌：采用胜者的值，绝不覆盖。
+      // 覆盖会造成三方分裂——两个进程各持一个令牌、文件里是其中之一，
+      // 重启后手机与电脑的令牌随机不一致。
+      try {
+        const winner = fs.readFileSync(TOKEN_PATH, 'utf8').trim();
+        if (winner.length >= 16) return winner;
+      } catch {}
+      console.error(`访问令牌文件 ${TOKEN_PATH} 已存在但内容无效；请删除该文件后重新启动。`);
+      process.exit(1);
+    }
+    // 令牌无法持久化时不能带着"重启即失效"的内存令牌继续跑：
+    // 那会让手机在下次重启后全部配对失败且无从解释。
+    console.error(`无法把访问令牌写入 ${TOKEN_PATH}：${error.message}`);
+    console.error('请修复 data 目录的写入权限后再启动（或用 PHONE_TOKEN/配置固定令牌）。');
+    process.exit(1);
   }
-  return generated;
 }
 let ACCESS_TOKEN = resolveAccessToken();
 // 由 PHONE_TOKEN / config.accessToken 明确固定的令牌不允许在线轮换；
@@ -318,7 +358,11 @@ const ACCESS_TOKEN_PINNED = Boolean(String(process.env.PHONE_TOKEN || fileConfig
 function rotateAccessToken() {
   if (ACCESS_TOKEN_PINNED) throw new Error('访问令牌由配置或环境变量固定，无法在线轮换；请在配置中修改。');
   const generated = crypto.randomBytes(18).toString('base64url');
-  fs.writeFileSync(TOKEN_PATH, `${generated}\r\n`, { encoding: 'utf8', mode: 0o600 });
+  // 先写临时文件再原子改名：中途崩溃/磁盘满不会把令牌文件留成空或半截，
+  // 也不会出现磁盘与内存不一致。
+  const tempPath = `${TOKEN_PATH}.tmp-${process.pid}`;
+  fs.writeFileSync(tempPath, `${generated}\r\n`, { encoding: 'utf8', mode: 0o600 });
+  fs.renameSync(tempPath, TOKEN_PATH);
   ACCESS_TOKEN = generated;
   return generated;
 }
@@ -849,6 +893,13 @@ class ClientHub {
         clearTimeout(state.frameAckTimer);
         state.awaitingFrameAck = false;
         log('warn', '向手机发送画面失败', { clientId: state.clientId, error: error.message });
+        // 失败期间可能已有新帧排队；这里必须再泵一次，否则该帧要等到
+        // 后续帧或外部事件出现才会被送出。
+        if (state.pendingFrame && state.ws.readyState === WebSocket.OPEN) {
+          clearTimeout(state.frameRetryTimer);
+          state.frameRetryTimer = setTimeout(() => this.pumpFrame(state), 120);
+          state.frameRetryTimer.unref?.();
+        }
         return;
       }
       // 下一帧由手机完成解码和绘制后的 frameAck 释放。这样网络或手机变慢时，
@@ -4277,8 +4328,24 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   const resolvedPublic = path.resolve(PUBLIC_DIR);
-  const filePath = path.resolve(PUBLIC_DIR, relativePath);
+  let filePath = path.resolve(PUBLIC_DIR, relativePath);
   if (filePath !== resolvedPublic && !filePath.startsWith(`${resolvedPublic}${path.sep}`)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', ...securityHeaders('text/plain') });
+    res.end('Not found');
+    return;
+  }
+  // 词法包含检查之外还要按真实路径复查一次：public 内若被放入指向外部的
+  // 符号链接，词法检查会放行而 realpath 不会。
+  try {
+    const realPublic = fs.realpathSync.native ? fs.realpathSync.native(resolvedPublic) : fs.realpathSync(resolvedPublic);
+    const realFile = fs.realpathSync.native ? fs.realpathSync.native(filePath) : fs.realpathSync(filePath);
+    if (realFile !== realPublic && !realFile.startsWith(`${realPublic}${path.sep}`)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', ...securityHeaders('text/plain') });
+      res.end('Not found');
+      return;
+    }
+    filePath = realFile;
+  } catch {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', ...securityHeaders('text/plain') });
     res.end('Not found');
     return;
@@ -4313,7 +4380,10 @@ server.requestTimeout = 30000;
 const wss = new WebSocketServer({
   noServer: true,
   perMessageDeflate: false,
-  maxPayload: 1024 * 1024,
+  // 上限必须容纳最坏情况的合法输入：剪贴板允许 100 万个 JS 字符，
+  // CJK/表情经 UTF-8+JSON 编码可达 3-4 MB；1 MiB 会在剪贴板校验之前
+  // 直接断开连接。8 MiB 覆盖最坏合法输入（连接已通过令牌认证）。
+  maxPayload: 8 * 1024 * 1024,
   clientTracking: false,
   // 只回选非机密的 epc.v1 应答子协议，令牌子协议永不出现在响应头里。
   handleProtocols: (protocols) => (protocols.has(WS_ACK_PROTOCOL) ? WS_ACK_PROTOCOL : false)
@@ -4370,6 +4440,8 @@ const controllerOnlyTypes = new Set([
   'viewport', 'navigate', 'back', 'forward', 'reload', 'touch', 'tap', 'wheel', 'text', 'key', 'selectAll',
   'mobile', 'streamPreset', 'followDesktopTabs', 'manualCompatibility', 'strictNativeTouch', 'manualCompatibilityAudit', 'selectTarget', 'newTab', 'closeTab', 'navigateHistoryEntry', 'dialog', 'recoverFrame', 'frameQuality', 'frameProblem', 'calibrationMarker', 'calibrationProbe',
   'requestUpload', 'cancelUpload', 'computerRoots', 'computerList', 'computerCommit', 'uploadBegin', 'uploadFileBegin', 'uploadChunkAck', 'uploadFileEnd', 'uploadCommit',
+  // 浏览历史与电脑文件/剪贴板同属"屏幕画面之外的本机数据"，只读端不可见。
+  'browserHistory',
   'clipboardGet', 'clipboardSet', 'dedicatedWindow', 'rotateToken'
 ]);
 
@@ -4458,6 +4530,12 @@ wss.on('connection', (ws, req, info) => {
   }
 
   async function handleBinaryUpload(raw) {
+    // 文本命令在 handleCommand 里统一做控制者校验；二进制分块也必须校验，
+    // 否则控制权被他人接管后，旧控制者仍能继续把文件写进电脑。
+    if (!hub.isController(ws)) {
+      await cleanupUpload(true);
+      throw new Error('当前手机处于只读状态，文件数据已拒绝。');
+    }
     const upload = state.uploadState;
     if (!upload?.stream || upload.currentIndex === null) throw new Error('收到文件数据，但上传会话没有开始。');
     if (upload.streamError) throw upload.streamError;
@@ -4482,6 +4560,16 @@ wss.on('connection', (ws, req, info) => {
       if (message.type === 'claimControl') {
         if (hub.controllerClientId && hub.controllerClientId !== state.clientId) {
           await cdp.releaseActiveInput('控制权切换');
+          // 被接管的控制者若有进行中的上传，立即终止并清理半截文件，
+          // 不能让旧控制者的传输在降权后继续落盘。
+          for (const [otherWs, otherState] of hub.clients) {
+            if (otherWs === ws || !otherState.uploadState) continue;
+            const upload = otherState.uploadState;
+            otherState.uploadState = null;
+            try { upload.stream?.destroy(); } catch {}
+            if (upload.dir) { try { fs.rmSync(upload.dir, { recursive: true, force: true }); } catch {} }
+            sendJson(otherWs, { type: 'status', level: 'warn', message: '控制权已被其他手机接管，你的文件上传已取消。' });
+          }
         }
         const claim = hub.claim(ws);
         reply(ws, requestId, { role: 'controller', changed: claim.changed });

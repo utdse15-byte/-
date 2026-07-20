@@ -1,4 +1,4 @@
-# Edge 手机 CDP 控制器 v6.8.1
+# Edge 手机 CDP 控制器 v6.8.2
 
 这是一个面向 Windows Edge 与 Android 手机的本地网页控制器。Edge 继续运行在 Windows 上，手机浏览器只负责显示远程网页画面，并把用户本人实时产生的点击、滚动、输入、标签切换和文件选择操作发送回电脑。
 
@@ -179,7 +179,7 @@ screencast
 建议解压到新目录，例如：
 
 ```text
-G:\edge-phone-cdp-inherit-live-v6.8.1
+G:\edge-phone-cdp-inherit-live-v6.8.2
 ```
 
 不要覆盖唯一可用的旧版本。
@@ -393,12 +393,12 @@ v6.8.0 明确不实现：
 
 ## 10. 版本与验证
 
-版本：`6.8.1`
+版本：`6.8.2`
 
 详细变更见：
 
 ```text
-更新说明-v6.8.1.md
+更新说明-v6.8.2.md
 ```
 
 自动测试、真实 Chromium CDP 测试及未验证项见：
