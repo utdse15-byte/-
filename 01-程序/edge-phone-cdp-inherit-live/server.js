@@ -22,7 +22,7 @@ const {
   resolveNativeScales
 } = require('./lib/input-coordinates');
 
-const VERSION = '6.8.1';
+const VERSION = '6.8.2';
 const SERVICE_ID = 'edge-phone-cdp-controller';
 const ROOT_DIR = __dirname;
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
