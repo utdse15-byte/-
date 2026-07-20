@@ -1,15 +1,15 @@
-# Edge 手机远程浏览器控制器 v6.8.4（程序 + AI 交接）
+# Edge 手机远程浏览器控制器 v6.8.5（程序 + AI 交接）
 
 这个组合包把可直接使用的完整程序、发布资料和 AI 交接规范放在一起。仓库为唯一事实源：`02-AI交接/` 是交接材料唯一副本，正式发布 ZIP 与 SHA-256 由 GitHub Actions 在打 tag 时自动生成。
 
 ## 用户使用
 
 1. 打开 `01-程序`；
-2. 源码仓库中程序位于 `01-程序/edge-phone-cdp-inherit-live/`，可直接运行；正式发布的 `edge-phone-cdp-inherit-live-v6.8.4.zip` 及其 SHA-256 由 CI 生成并发布到 GitHub Releases；
+2. 源码仓库中程序位于 `01-程序/edge-phone-cdp-inherit-live/`，可直接运行；正式发布的 `edge-phone-cdp-inherit-live-v6.8.5.zip` 及其 SHA-256 由 CI 生成并发布到 GitHub Releases；
 3. 若使用发布 ZIP，解压到新的固定目录，例如：
 
 ```text
-G:\edge-phone-cdp-inherit-live-v6.8.4
+G:\edge-phone-cdp-inherit-live-v6.8.5
 ```
 
 4. 先阅读程序内的 `README-中文.md`；
@@ -26,7 +26,7 @@ G:\edge-phone-cdp-inherit-live-v6.8.4
 5. `02-AI交接/v6.8.0实现对照表.md`
 6. `02-AI交接/已知限制与后续路线.md`
 7. `02-AI交接/历史问题与设计结论.md`
-8. `01-程序/edge-phone-cdp-inherit-live/` 中的 `README-中文.md`、`更新说明-v6.8.4.md` 和 `发布验证报告.md`
+8. `01-程序/edge-phone-cdp-inherit-live/` 中的 `README-中文.md`、`更新说明-v6.8.5.md` 和 `发布验证报告.md`
 
 ## 不可静默改变的要求
 

@@ -23,7 +23,7 @@ const {
   resolveNativeScales
 } = require('./lib/input-coordinates');
 
-const VERSION = '6.8.4';
+const VERSION = '6.8.5';
 const SERVICE_ID = 'edge-phone-cdp-controller';
 const ROOT_DIR = __dirname;
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
@@ -121,12 +121,12 @@ const EDGE_DEBUG_PROMPT_COOLDOWN_MS = Math.round(numberSetting(
 ) * 1000);
 const EDGE_WRAPPER_LAUNCH_AT_MS = Math.max(0, Number(process.env.EDGE_WRAPPER_LAUNCH_AT_MS) || 0);
 const SCREENCAST_QUALITY = Math.round(numberSetting(process.env.SCREENCAST_QUALITY || fileConfig.screencastQuality, 72, 30, 95));
-const SCREENCAST_MAX_DIMENSION = Math.round(numberSetting(process.env.SCREENCAST_MAX_DIMENSION || fileConfig.screencastMaxDimension, 2048, 640, 4096));
+const SCREENCAST_MAX_DIMENSION = Math.round(numberSetting(process.env.SCREENCAST_MAX_DIMENSION || fileConfig.screencastMaxDimension, 2560, 640, 4096));
 const SNAPSHOT_FALLBACK_FPS = numberSetting(process.env.SNAPSHOT_FALLBACK_FPS || fileConfig.snapshotFallbackFps, 3, 0.5, 10);
 // 静止画面高清化：页面持续无新帧、无输入时补拍一张无损 PNG，一有操作立即回到实时 JPEG。
 // 纯画面编码层的基础设施自动化（规范 2.3 允许范围），不触碰目标页面。
 const IDLE_SHARPEN_ENABLED = boolSetting(process.env.IDLE_SHARPEN_ENABLED ?? fileConfig.idleSharpenEnabled, true);
-const IDLE_SHARPEN_DELAY_MS = Math.round(numberSetting(process.env.IDLE_SHARPEN_DELAY_MS ?? fileConfig.idleSharpenDelayMs, 1500, 500, 15000));
+const IDLE_SHARPEN_DELAY_MS = Math.round(numberSetting(process.env.IDLE_SHARPEN_DELAY_MS ?? fileConfig.idleSharpenDelayMs, 900, 500, 15000));
 const MAX_UPLOAD_BYTES = Math.round(numberSetting(process.env.MAX_UPLOAD_BYTES, numberSetting(fileConfig.maxUploadMB, 512, 1, 4096) * 1024 * 1024, 1024 * 1024, 4 * 1024 * 1024 * 1024));
 const MAX_UPLOAD_FILES = Math.round(numberSetting(process.env.MAX_UPLOAD_FILES || fileConfig.maxUploadFiles, 64, 1, 500));
 const MAX_COMPUTER_FILES = Math.round(numberSetting(process.env.MAX_COMPUTER_FILES || fileConfig.maxComputerFiles, 256, 1, 2000));
@@ -309,7 +309,9 @@ const STREAM_PRESETS = Object.freeze({
   economy: { quality: 44, maxDpr: 0.9, everyNthFrame: 2 },
   realtime: { quality: 56, maxDpr: 1.05, everyNthFrame: 1 },
   balanced: { quality: Math.min(SCREENCAST_QUALITY, 72), maxDpr: 1.35, everyNthFrame: 1 },
-  clear: { quality: Math.max(SCREENCAST_QUALITY, 82), maxDpr: 2, everyNthFrame: 1 }
+  // 清晰档 2.5× 与手机端 canvas 的像素密度上限一致：局域网下端到端像素
+  // 对齐，连续帧不再经历"低分辨率采集→手机放大"的糊化。
+  clear: { quality: Math.max(SCREENCAST_QUALITY, 82), maxDpr: 2.5, everyNthFrame: 1 }
 });
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -824,6 +826,10 @@ class ClientHub {
   framePressure() {
     const state = this.controllerState();
     if (!state) return { bufferedBytes: 0, renderMs: 0, awaitingAckMs: 0, droppedFrames: 0, ackTimeouts: 0 };
+    return this.clientFramePressure(state);
+  }
+
+  clientFramePressure(state) {
     const now = Date.now();
     const ackAge = state.lastFrameAck?.receivedAt ? now - state.lastFrameAck.receivedAt : Infinity;
     return {
@@ -833,6 +839,21 @@ class ClientHub {
       droppedFrames: state.droppedFrames || 0,
       ackTimeouts: state.frameAckTimeouts || 0
     };
+  }
+
+  // 帧都会广播给每台已连接手机：升降档要看最坏链路，不能只看控制端。
+  worstFramePressure() {
+    const worst = { bufferedBytes: 0, renderMs: 0, awaitingAckMs: 0, droppedFrames: 0, ackTimeouts: 0 };
+    for (const state of this.clients.values()) {
+      if (!state.ws || state.ws.readyState !== 1) continue;
+      const pressure = this.clientFramePressure(state);
+      worst.bufferedBytes = Math.max(worst.bufferedBytes, pressure.bufferedBytes);
+      worst.renderMs = Math.max(worst.renderMs, pressure.renderMs);
+      worst.awaitingAckMs = Math.max(worst.awaitingAckMs, pressure.awaitingAckMs);
+      worst.droppedFrames = Math.max(worst.droppedFrames, pressure.droppedFrames);
+      worst.ackTimeouts = Math.max(worst.ackTimeouts, pressure.ackTimeouts);
+    }
+    return worst;
   }
 
   publishRoles() {
@@ -2765,16 +2786,10 @@ class CdpController {
   effectiveStreamSettings() {
     let presetName = this.viewport.streamPreset;
     if (presetName === 'auto') {
-      const pressure = hub.framePressure();
-      const current = ['economy', 'realtime', 'balanced'].includes(this.viewport.effectiveStreamPreset)
-        ? this.viewport.effectiveStreamPreset
-        : 'realtime';
-      const severe = pressure.bufferedBytes > 900 * 1024 || pressure.renderMs > 210 || pressure.awaitingAckMs > FRAME_ACK_TIMEOUT_MS * 0.9;
-      const mild = pressure.bufferedBytes > 220 * 1024 || pressure.renderMs > 92 || pressure.awaitingAckMs > 180;
-      const recovered = pressure.bufferedBytes < 96 * 1024 && pressure.renderMs > 0 && pressure.renderMs < 58 && pressure.awaitingAckMs < 90;
-      if (current === 'economy') presetName = recovered ? 'realtime' : 'economy';
-      else if (current === 'balanced') presetName = severe ? 'economy' : mild ? 'realtime' : 'balanced';
-      else presetName = severe ? 'economy' : recovered ? 'balanced' : 'realtime';
+      // 自动模式下"当前生效档"只由 refreshAdaptiveStreamPreset（带稳定期与
+      // 冷却的唯一升降路径）改变；这里只回读当前档。屏幕重启、换页等旁路
+      // 调用本函数时绝不即兴跳档，否则一次瞬时压力采样就能绕过全部迟滞。
+      presetName = this.viewport.effectiveStreamPreset;
     }
     if (!STREAM_PRESETS[presetName]) presetName = 'realtime';
     const base = { ...STREAM_PRESETS[presetName] };
@@ -2794,10 +2809,29 @@ class CdpController {
     this.viewportFallbackTimer.unref?.();
   }
 
+  // 自动档升降决策。压力取所有已连接手机的最坏值：只看控制端会让弱网的
+  // 只读手机被高档位压成幻灯片而永远触发不了降档。
+  adaptiveLadderNext() {
+    const pressure = hub.worstFramePressure();
+    const current = ['economy', 'realtime', 'balanced', 'clear'].includes(this.viewport.effectiveStreamPreset)
+      ? this.viewport.effectiveStreamPreset
+      : 'realtime';
+    const severe = pressure.bufferedBytes > 900 * 1024 || pressure.renderMs > 210 || pressure.awaitingAckMs > FRAME_ACK_TIMEOUT_MS * 0.9;
+    const mild = pressure.bufferedBytes > 220 * 1024 || pressure.renderMs > 92 || pressure.awaitingAckMs > 180;
+    const recovered = pressure.bufferedBytes < 96 * 1024 && pressure.renderMs > 0 && pressure.renderMs < 58 && pressure.awaitingAckMs < 90;
+    // 链路"优秀"才允许从均衡升到清晰档（2.5× 采集 + 高 JPEG 质量）：缓冲
+    // 几乎清空、渲染与确认都很快，局域网直连通常满足。
+    const excellent = pressure.bufferedBytes < 48 * 1024 && pressure.renderMs > 0 && pressure.renderMs < 46 && pressure.awaitingAckMs < 70;
+    if (current === 'economy') return recovered ? 'realtime' : 'economy';
+    if (current === 'clear') return severe ? 'economy' : mild ? 'balanced' : 'clear';
+    if (current === 'balanced') return severe ? 'economy' : mild ? 'realtime' : excellent ? 'clear' : 'balanced';
+    return severe ? 'economy' : recovered ? 'balanced' : 'realtime';
+  }
+
   async refreshAdaptiveStreamPreset() {
     if (this.viewport.streamPreset !== 'auto' || !this.screencastRunning || !this.isOpen()) return;
     const now = Date.now();
-    const next = this.effectiveStreamSettings().name;
+    const next = this.adaptiveLadderNext();
     if (next === this.viewport.effectiveStreamPreset) {
       this.adaptiveCandidate = null;
       this.adaptiveCandidateSince = 0;
@@ -2808,8 +2842,13 @@ class CdpController {
       this.adaptiveCandidateSince = now;
       return;
     }
-    if (now - this.adaptiveCandidateSince < 6000) return;
-    if (now - this.lastAdaptiveSwitchAt < 20000 || now - this.lastScreencastStartAt < 12000) return;
+    // 快降慢升：降档时压力已经在伤害体验，2 秒稳定即可执行且不受 20 秒
+    // 冷却/启动静默限制（否则升到清晰后的头 20 秒即使卡成幻灯片也降不
+    // 下来）；升档保持 6 秒稳定 + 20 秒冷却 + 启动后 12 秒静默。
+    const rank = { economy: 0, realtime: 1, balanced: 2, clear: 3 };
+    const isDowngrade = (rank[next] ?? 1) < (rank[this.viewport.effectiveStreamPreset] ?? 1);
+    if (now - this.adaptiveCandidateSince < (isDowngrade ? 2000 : 6000)) return;
+    if (!isDowngrade && (now - this.lastAdaptiveSwitchAt < 20000 || now - this.lastScreencastStartAt < 12000)) return;
 
     const sequenceAtStart = this.lastFrameSequence;
     this.viewport.effectiveStreamPreset = next;
@@ -3563,9 +3602,43 @@ class CdpController {
         chain
       };
     })()`;
+    const probe = await this.runUserProbe(expression, '用户触发点击测试探针（一次性只读检查）', { x: px, y: py });
+    return { point: { x: px, y: py }, probe };
+  }
+
+  // "一次性只读检查"的共同边界（tapProbe / 取回输入框文本共用）：只在
+  // 用户显式点击的那一刻执行一次 Runtime.evaluate、returnByValue、5 秒
+  // 超时、按严格模式标记记入日志，绝不轮询或常驻。
+  async runUserProbe(expression, logMessage, logDetails = {}) {
+    this.markUserActivation();
     const evaluated = await this.send('Runtime.evaluate', { expression, returnByValue: true }, { timeout: 5000 });
-    log('info', '用户触发点击测试探针（一次性只读检查）', { x: px, y: py, strict: this.manualCompatibilityActive });
-    return { point: { x: px, y: py }, probe: evaluated?.result?.value || null };
+    log('info', logMessage, { ...logDetails, strict: this.manualCompatibilityActive });
+    return evaluated?.result?.value ?? null;
+  }
+
+  // 取回远程网页里聚焦输入框的现有文本。写回方向（手机端"实时同步"）走
+  // 纯 Input 通道（退格 + insertText），不产生任何页面信号。
+  async pullEditableText() {
+    const expression = `(() => {
+      const el = document.activeElement;
+      const isField = Boolean(el && el.matches && el.matches('input, textarea'));
+      const editable = isField || Boolean(el && el.isContentEditable);
+      if (!editable) {
+        return { ok: false, reason: 'no-editable-focus', activeTag: el ? el.tagName : '' };
+      }
+      const raw = isField ? String(el.value ?? '') : String(el.innerText ?? '');
+      const limit = 20000;
+      return {
+        ok: true,
+        kind: isField ? 'field' : 'contenteditable',
+        tag: el.tagName,
+        truncated: raw.length > limit,
+        length: raw.length,
+        text: raw.slice(0, limit)
+      };
+    })()`;
+    const value = await this.runUserProbe(expression, '用户触发取回输入框文本（一次性只读检查）');
+    return value || { ok: false, reason: 'no-result' };
   }
 
   // CDP 输入接口的坐标单位并不相同：Input.dispatchMouseEvent 与
@@ -4004,7 +4077,7 @@ class CdpController {
     this.scheduleVisualRefresh('text', 100);
   }
 
-  async pressKey(name, modifiers = 0) {
+  async pressKey(name, modifiers = 0, count = 1) {
     const keys = {
       Enter: { key: 'Enter', code: 'Enter', vk: 13 },
       Backspace: { key: 'Backspace', code: 'Backspace', vk: 8 },
@@ -4027,8 +4100,15 @@ class CdpController {
       nativeVirtualKeyCode: item.vk,
       modifiers: clampInt(modifiers, 0, 15, 0)
     };
-    await this.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...common });
-    await this.send('Input.dispatchKeyEvent', { type: 'keyUp', ...common });
+    // 批量（实时同步的差量退格）按物理键盘自动重复的节奏注入：键间
+    // 24-42ms 抖动间隔，不是零间隔的机器连发；上限 40 与手机端差量
+    // 阈值一致（更大的改动走 全选+整段替换）。
+    const repeat = clampInt(count, 1, 40, 1);
+    for (let i = 0; i < repeat; i += 1) {
+      if (i > 0) await new Promise((resolve) => setTimeout(resolve, 24 + Math.floor(Math.random() * 19)));
+      await this.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...common });
+      await this.send('Input.dispatchKeyEvent', { type: 'keyUp', ...common });
+    }
     this.scheduleVisualRefresh('key', 100);
   }
 
@@ -4552,7 +4632,7 @@ server.on('upgrade', (req, socket, head) => {
 
 const controllerOnlyTypes = new Set([
   'viewport', 'navigate', 'back', 'forward', 'reload', 'touch', 'tap', 'wheel', 'text', 'key', 'selectAll',
-  'mobile', 'streamPreset', 'followDesktopTabs', 'manualCompatibility', 'strictNativeTouch', 'manualCompatibilityAudit', 'selectTarget', 'newTab', 'closeTab', 'navigateHistoryEntry', 'dialog', 'recoverFrame', 'frameQuality', 'frameProblem', 'calibrationMarker', 'calibrationProbe', 'tapProbe',
+  'mobile', 'streamPreset', 'followDesktopTabs', 'manualCompatibility', 'strictNativeTouch', 'manualCompatibilityAudit', 'selectTarget', 'newTab', 'closeTab', 'navigateHistoryEntry', 'dialog', 'recoverFrame', 'frameQuality', 'frameProblem', 'calibrationMarker', 'calibrationProbe', 'tapProbe', 'pullEditableText',
   'requestUpload', 'cancelUpload', 'computerRoots', 'computerList', 'computerCommit', 'uploadBegin', 'uploadFileBegin', 'uploadChunkAck', 'uploadFileEnd', 'uploadCommit',
   // 浏览历史与电脑文件/剪贴板同属"屏幕画面之外的本机数据"，只读端不可见。
   'browserHistory',
@@ -4768,7 +4848,8 @@ wss.on('connection', (ws, req, info) => {
           await cdp.insertText(message.text);
           break;
         case 'key':
-          await cdp.pressKey(message.key, message.modifiers);
+          // count 供实时同步的批量退格使用（差量删除），普通按键仍为 1。
+          await cdp.pressKey(message.key, message.modifiers, message.count);
           break;
         case 'selectAll':
           await cdp.selectAll();
@@ -4812,6 +4893,9 @@ wss.on('connection', (ws, req, info) => {
           result = await cdp.probeTapPoint(resolved.point);
           break;
         }
+        case 'pullEditableText':
+          result = await cdp.pullEditableText();
+          break;
         case 'tabs':
           await cdp.publishTabs(ws);
           break;
