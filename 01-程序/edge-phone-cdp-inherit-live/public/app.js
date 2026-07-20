@@ -655,6 +655,9 @@
       state.reconnectDueAt = 0;
       setOverlay('tokenOverlay', false);
       showToast('已连接电脑控制器', 'ok', 1600);
+      // （重）连接后远程页面/输入框状态未知：作废实时同步基准，要求重新取回，
+      // 绝不拿断线前的旧基准去算差量。首连时基准本就为空，静默处理。
+      invalidateLiveSyncBase('已重新连接，实时同步已暂停：点"取回网页文本"重新对齐。');
       scheduleViewport(true, true);
       request('reloadState').catch(() => {});
       scheduleNoFrameFallback(2200, '首次连接');
@@ -2707,6 +2710,7 @@
 
   function navigateAddress(value) {
     if (state.role !== 'controller') return;
+    invalidateLiveSyncBase('已跳转网址，实时同步已暂停：点"取回网页文本"重新对齐。');
     request('navigate', { url: value }).catch((error) => showToast(error.message, 'error', 3500));
     elements.addressInput.blur();
     markVisualDemand('navigate', 1200);
@@ -2948,6 +2952,9 @@
       select.append(title, url);
       select.addEventListener('click', async () => {
         try {
+          // 切换目标标签是同步发生的，而新目标的 pageState 要稍后才到——先
+          // 同步作废基准，防止这期间一次防抖差量落进新标签页的输入框。
+          invalidateLiveSyncBase('已切换标签页，实时同步已暂停：点"取回网页文本"重新对齐。');
           await request('selectTarget', { targetId: tab.id }, 20000);
           setOverlay('tabsOverlay', false);
           markVisualDemand('switch-tab', 500);
@@ -2963,6 +2970,8 @@
       close.disabled = state.role !== 'controller';
       close.addEventListener('click', async () => {
         try {
+          // 关闭标签会自动切到另一个标签：同步作废基准，避免差量落进它。
+          invalidateLiveSyncBase('已关闭标签页，实时同步已暂停：点"取回网页文本"重新对齐。');
           await request('closeTab', { targetId: tab.id }, 20000);
           await request('tabs');
         } catch (error) {
@@ -3768,15 +3777,21 @@
       event.preventDefault();
       navigateAddress(elements.addressInput.value);
     });
+    // 后退/前进/刷新会换页或重置输入框，但同 URL 的刷新、SPA 内的前进后退
+    // 不会改变 pageState 的 url/targetId（那条异步失效路径漏判）——这里同步
+    // 作废实时同步基准，避免刷新后差量落到被重置的输入框上。
     elements.backButton.addEventListener('click', () => {
+      invalidateLiveSyncBase('页面已后退，实时同步已暂停：点"取回网页文本"重新对齐。');
       request('back').catch((error) => showToast(error.message, 'error'));
       markVisualDemand('back', 900);
     });
     elements.forwardButton.addEventListener('click', () => {
+      invalidateLiveSyncBase('页面已前进，实时同步已暂停：点"取回网页文本"重新对齐。');
       request('forward').catch((error) => showToast(error.message, 'error'));
       markVisualDemand('forward', 900);
     });
     $('reloadButton').addEventListener('click', (event) => {
+      invalidateLiveSyncBase('页面已刷新，实时同步已暂停：点"取回网页文本"重新对齐。');
       request('reload', { ignoreCache: event.shiftKey }).catch((error) => showToast(error.message, 'error'));
       markVisualDemand('reload', 1200);
     });
@@ -3802,15 +3817,22 @@
     const liveEditLock = () => state.liveTextSync && state.role === 'controller';
     let liveSyncQueue = Promise.resolve();
     let liveSyncTimer = null;
+    // 每次基准失效都自增：在途的差量任务据此在每个远程写入之间自查，一旦
+    // 代变了就停手，绝不把删除/插入落到已经移动的光标上。
+    let liveSyncGeneration = 0;
     invalidateLiveSyncBase = (toastMessage) => {
       if (!state.liveTextSync) return;
       state.liveSyncWholeField = false;
       if (!state.liveSyncBaseValid) return;
-      // 没有任何已同步/待同步内容时静默失效（无可损失，也不打扰）。
-      if (!state.liveSyncBase && !elements.textInput.value) return;
+      // 任何"远程光标/焦点/内容可能已改变"的事件都要真正暂停同步：置基准
+      // 无效并自增代（打断在途写入）。两边都空时也照样置无效——否则点了
+      // 别的（可能有内容的）输入框后，下一次插入会落到错误的地方；只是此时
+      // 无可损失，就静默处理不打扰。有内容才提示需要重新取回。
+      const hadContent = Boolean(state.liveSyncBase || elements.textInput.value);
       state.liveSyncBaseValid = false;
+      liveSyncGeneration += 1;
       clearTimeout(liveSyncTimer);
-      showToast(toastMessage || '页面焦点可能已变化，实时同步已暂停：点"取回网页文本"重新对齐后继续。', 'warn', 3400);
+      if (hadContent) showToast(toastMessage || '页面焦点可能已变化，实时同步已暂停：点"取回网页文本"重新对齐后继续。', 'warn', 3400);
     };
     const liveSyncDiff = (base, next) => {
       // 快路径：纯末尾追加 / 纯末尾删除（覆盖绝大多数打字场景，避免每次
@@ -3835,11 +3857,16 @@
       if (!liveEditLock() || !wsIsOpen()) return liveSyncQueue;
       liveSyncQueue = liveSyncQueue.then(async () => {
         if (!liveEditLock() || !wsIsOpen() || !state.liveSyncBaseValid) return;
+        const gen = liveSyncGeneration;
         const base = state.liveSyncBase;
         const next = elements.textInput.value;
         if (next === base) return;
         const { deletions, insertion, removed } = liveSyncDiff(base, next);
         const removedCrossesLine = removed.includes('\n');
+        // 每个远程写入之间重新自查：一旦有失效事件（点画面、切页/标签、
+        // 断线、失败）改了代或作废了基准，立刻停手——绝不把删除/插入落到
+        // 已经移动的光标上，也不把基准推进到不可信的状态。
+        const stillOk = () => gen === liveSyncGeneration && state.liveSyncBaseValid && liveEditLock() && wsIsOpen();
         try {
           if (deletions > 40 || (deletions > 0 && removedCrossesLine)) {
             if (!state.liveSyncWholeField) {
@@ -3848,13 +3875,26 @@
               invalidateLiveSyncBase('这次改动较大，需要先点"取回网页文本"对齐后再同步，避免误删网页里的其他内容。');
               return;
             }
+            // 破坏性整段替换前，先只读取回校验远程全文仍等于基准：防桌面端
+            // 或页面脚本在同一输入框改动后，被 selectAll 连带整段覆盖。
+            const check = await request('pullEditableText', {}, 15000);
+            if (!stillOk()) return;
+            if (!check?.ok || check.truncated || String(check.text || '') !== base) {
+              invalidateLiveSyncBase('网页内容已在别处变化，实时同步已暂停：点"取回网页文本"重新对齐。');
+              return;
+            }
             await request('selectAll');
+            if (!stillOk()) return;
             if (next) await request('text', { text: next });
             else await request('key', { key: 'Backspace' });
           } else {
-            if (deletions > 0) await request('key', { key: 'Backspace', count: deletions });
+            if (deletions > 0) {
+              await request('key', { key: 'Backspace', count: deletions });
+              if (!stillOk()) return;
+            }
             if (insertion) await request('text', { text: insertion });
           }
+          if (!stillOk()) return;
           state.liveSyncBase = next;
           markVisualDemand('live-sync', 500);
         } catch (error) {
@@ -3952,10 +3992,29 @@
             showToast('实时同步未完成，已取消发送（文字仍在本地输入框里）。', 'warn', 3200);
             return;
           }
+          // 提交期间冻结同步（置基准无效 + 自增代 + 清防抖定时器）：防止用户
+          // 在发送瞬间继续打字，让那次差量与下面的回车/取回在网线上交错。
+          state.liveSyncBaseValid = false;
+          liveSyncGeneration += 1;
+          clearTimeout(liveSyncTimer);
           await request('key', { key: 'Enter' });
-          elements.textInput.value = '';
-          state.liveSyncBase = '';
-          state.liveSyncWholeField = false;
+          // 回车对聊天框是"提交并清空"，对多行文本域只是"插入换行"——无法
+          // 预判。发送后重新取回一次让本地与基准对齐到真实内容：聊天框会
+          // 变空、文本域会留着刚才的文字（用户看得见、不会误以为已发走而
+          // 丢稿）。取不回就保守失效，不擅自清空本地。
+          const after = await request('pullEditableText', {}, 15000).catch(() => null);
+          if (after?.ok && !after.truncated) {
+            await request('selectAll');
+            await request('key', { key: 'ArrowRight' });
+            const text = String(after.text || '');
+            elements.textInput.value = text;
+            state.liveSyncBase = text;
+            state.liveSyncBaseValid = true;
+            state.liveSyncWholeField = true;
+          } else {
+            state.liveSyncBaseValid = false;
+            state.liveSyncWholeField = false;
+          }
           if (keepFocus) elements.textInput.focus();
           markVisualDemand('text', 500);
         } catch (error) {
@@ -4040,9 +4099,11 @@
       button.addEventListener('pointerleave', stopRepeat);
       button.addEventListener('contextmenu', (event) => event.preventDefault());
       // pointerdown 已经发过一次；部分浏览器 preventDefault 后仍派发 click，
-      // 忽略它避免双发。键盘/无障碍激活（无 pointerdown）仍走 click。
-      button.addEventListener('click', () => {
-        if (Date.now() - lastPointerActivityAt < 800) return;
+      // 忽略它避免双发。指针派生的 click 带 detail>=1，键盘/无障碍激活的
+      // click 带 detail===0——后者始终放行（不受抑制窗口影响，也不会被一次
+      // 触摸的时间戳误伤），前者在抑制窗口内忽略。
+      button.addEventListener('click', (event) => {
+        if (event.detail !== 0 && Date.now() - lastPointerActivityAt < 800) return;
         sendOnce();
       });
     });

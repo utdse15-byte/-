@@ -826,10 +826,6 @@ class ClientHub {
   framePressure() {
     const state = this.controllerState();
     if (!state) return { bufferedBytes: 0, renderMs: 0, awaitingAckMs: 0, droppedFrames: 0, ackTimeouts: 0 };
-    return this.clientFramePressure(state);
-  }
-
-  clientFramePressure(state) {
     const now = Date.now();
     const ackAge = state.lastFrameAck?.receivedAt ? now - state.lastFrameAck.receivedAt : Infinity;
     return {
@@ -839,21 +835,6 @@ class ClientHub {
       droppedFrames: state.droppedFrames || 0,
       ackTimeouts: state.frameAckTimeouts || 0
     };
-  }
-
-  // 帧都会广播给每台已连接手机：升降档要看最坏链路，不能只看控制端。
-  worstFramePressure() {
-    const worst = { bufferedBytes: 0, renderMs: 0, awaitingAckMs: 0, droppedFrames: 0, ackTimeouts: 0 };
-    for (const state of this.clients.values()) {
-      if (!state.ws || state.ws.readyState !== 1) continue;
-      const pressure = this.clientFramePressure(state);
-      worst.bufferedBytes = Math.max(worst.bufferedBytes, pressure.bufferedBytes);
-      worst.renderMs = Math.max(worst.renderMs, pressure.renderMs);
-      worst.awaitingAckMs = Math.max(worst.awaitingAckMs, pressure.awaitingAckMs);
-      worst.droppedFrames = Math.max(worst.droppedFrames, pressure.droppedFrames);
-      worst.ackTimeouts = Math.max(worst.ackTimeouts, pressure.ackTimeouts);
-    }
-    return worst;
   }
 
   publishRoles() {
@@ -1034,6 +1015,7 @@ class CdpController {
     this.lastAdaptiveSwitchAt = 0;
     this.adaptiveCandidate = null;
     this.adaptiveCandidateSince = 0;
+    this.clearProbeBlockedUntil = 0;
     this.viewportFallbackTimer = null;
     this.lastVisualDemandAt = 0;
     this.lastVisualDemandSequence = 0;
@@ -2809,10 +2791,12 @@ class CdpController {
     this.viewportFallbackTimer.unref?.();
   }
 
-  // 自动档升降决策。压力取所有已连接手机的最坏值：只看控制端会让弱网的
-  // 只读手机被高档位压成幻灯片而永远触发不了降档。
+  // 自动档升降决策。压力取控制端（当前操作的手机）：整条画面流是全局单一
+  // 质量，而每台手机各自有"最新帧优先"的独立限流（弱网只读端会被单独丢帧、
+  // 不会拖累别人），所以全局质量应服务于正在操作的控制端——用最坏值会让
+  // 一台卡住/半死的只读手机把整机压成幻灯片且再也升不回来。
   adaptiveLadderNext() {
-    const pressure = hub.worstFramePressure();
+    const pressure = hub.framePressure();
     const current = ['economy', 'realtime', 'balanced', 'clear'].includes(this.viewport.effectiveStreamPreset)
       ? this.viewport.effectiveStreamPreset
       : 'realtime';
@@ -2820,11 +2804,14 @@ class CdpController {
     const mild = pressure.bufferedBytes > 220 * 1024 || pressure.renderMs > 92 || pressure.awaitingAckMs > 180;
     const recovered = pressure.bufferedBytes < 96 * 1024 && pressure.renderMs > 0 && pressure.renderMs < 58 && pressure.awaitingAckMs < 90;
     // 链路"优秀"才允许从均衡升到清晰档（2.5× 采集 + 高 JPEG 质量）：缓冲
-    // 几乎清空、渲染与确认都很快，局域网直连通常满足。
+    // 几乎清空、渲染与确认都很快，局域网直连通常满足。清晰档若因过载被降下
+    // 来，clearProbeBlockedUntil 会压住一段时间再探测，避免"升清晰→过载→降
+    // 均衡→又探清晰"每 20 秒一次的抖动（每次都要重启截图、画面闪一下）。
     const excellent = pressure.bufferedBytes < 48 * 1024 && pressure.renderMs > 0 && pressure.renderMs < 46 && pressure.awaitingAckMs < 70;
+    const clearAllowed = excellent && Date.now() >= (this.clearProbeBlockedUntil || 0);
     if (current === 'economy') return recovered ? 'realtime' : 'economy';
     if (current === 'clear') return severe ? 'economy' : mild ? 'balanced' : 'clear';
-    if (current === 'balanced') return severe ? 'economy' : mild ? 'realtime' : excellent ? 'clear' : 'balanced';
+    if (current === 'balanced') return severe ? 'economy' : mild ? 'realtime' : clearAllowed ? 'clear' : 'balanced';
     return severe ? 'economy' : recovered ? 'balanced' : 'realtime';
   }
 
@@ -2851,6 +2838,10 @@ class CdpController {
     if (!isDowngrade && (now - this.lastAdaptiveSwitchAt < 20000 || now - this.lastScreencastStartAt < 12000)) return;
 
     const sequenceAtStart = this.lastFrameSequence;
+    // 从清晰档因过载被降下来：压住清晰档探测 3 分钟，打断 20 秒周期的抖动。
+    if (this.viewport.effectiveStreamPreset === 'clear' && isDowngrade) {
+      this.clearProbeBlockedUntil = now + 180000;
+    }
     this.viewport.effectiveStreamPreset = next;
     this.lastAdaptiveSwitchAt = now;
     this.adaptiveCandidate = null;
