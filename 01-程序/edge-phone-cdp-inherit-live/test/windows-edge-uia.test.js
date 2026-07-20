@@ -26,6 +26,38 @@ assert.strictEqual(normalizeAddress('nas:5000/index'), 'nas:5000/index');
 // 不透明协议保留前缀：about:blank 不得与主机名恰为 "blank" 的网页相撞。
 assert.strictEqual(normalizeAddress('about:blank'), 'about:blank');
 assert.notStrictEqual(normalizeAddress('about:blank'), normalizeAddress('https://blank/'));
+
+// 身份非碰撞不变量：语义不同的两个 target 绝不能归一化成同一个身份。
+// view-source: 是身份的一部分（CDP 视其为独立 target）。
+assert.notStrictEqual(
+  normalizeAddress('view-source:https://example.com/a'),
+  normalizeAddress('https://example.com/a')
+);
+// fragment 保留：hash 路由的单页应用靠它区分不同页面。
+assert.notStrictEqual(
+  normalizeAddress('https://example.com/#/a'),
+  normalizeAddress('https://example.com/#/b')
+);
+// URI 规范只有 scheme 与 host 大小写不敏感：路径/查询保留大小写。
+assert.notStrictEqual(
+  normalizeAddress('https://example.com/A?q=X'),
+  normalizeAddress('https://example.com/a?q=x')
+);
+// 同时保持既有模糊宽容：host 大小写、www、协议省略、结尾斜杠仍然合并。
+assert.strictEqual(normalizeAddress('HTTPS://WWW.Example.COM/a/'), 'example.com/a');
+// 地址栏省略 hash 时仍能唯一前缀命中带 hash 路由的页面。
+{
+  const hashTargets = [
+    { id: 'h1', title: '会话', url: 'https://app.example.com/#/conversation/abc', controllable: true },
+    { id: 'h2', title: '别的', url: 'https://other.example.com/', controllable: true }
+  ];
+  const hashMatch = chooseTargetFromUia(hashTargets, {
+    edgeForeground: true,
+    address: 'app.example.com',
+    tabTitle: '完全不同的标题'
+  });
+  assert.strictEqual(hashMatch?.target?.id, 'h1', '省略 hash 的地址栏文本应能边界前缀命中');
+}
 {
   const hostPortTargets = [
     { id: 'x', title: 'Admin', url: 'http://localhost:3000/admin/panel', controllable: true },
@@ -114,5 +146,30 @@ assert.strictEqual(chooseTargetFromUia(targets, {
   edgeForeground: true,
   address: 'chatgpt.com/c/def'
 }, { allowedTargetIds: [] }), null);
+
+// 作用域过滤不得制造假唯一：专用窗口内外各有一个相同 URL 的标签、真正的
+// 前台是主窗口那个时，必须保持当前标签——先在全集内判定身份，再查作用域，
+// 不能先删掉集合外证据、再宣布剩下的候选"唯一命中"。
+{
+  const dupTargets = [
+    { id: 'ded', title: '同一页', url: 'https://example.com/shared', controllable: true }, // 专用窗口内
+    { id: 'main', title: '同一页', url: 'https://example.com/shared', controllable: true } // 主窗口
+  ];
+  assert.strictEqual(chooseTargetFromUia(dupTargets, {
+    edgeForeground: true,
+    address: 'example.com/shared',
+    tabTitle: '同一页'
+  }, { allowedTargetIds: ['ded'] }), null, '集合内外同 URL 属于歧义，不得切换');
+  // 对照：URL 仅存在于专用窗口内时照常唯一匹配。
+  const uniqueInside = chooseTargetFromUia([
+    { id: 'ded2', title: '独有页', url: 'https://example.com/only-in-dedicated', controllable: true },
+    { id: 'main2', title: '别的页', url: 'https://example.com/other', controllable: true }
+  ], {
+    edgeForeground: true,
+    address: 'example.com/only-in-dedicated',
+    tabTitle: '独有页'
+  }, { allowedTargetIds: ['ded2'] });
+  assert.strictEqual(uniqueInside?.target?.id, 'ded2', '仅存在于专用窗口内的 URL 照常跟随');
+}
 
 console.log('windows-edge-uia.test.js: OK');

@@ -19,12 +19,18 @@ function normalizeTabTitle(value) {
 function normalizeAddress(value) {
   let text = normalizeWhitespace(value);
   if (!text) return '';
-  text = text.replace(/^view-source:/i, '');
+  // view-source: 是目标身份的一部分（同一 URL 的源代码页与普通页在 CDP 里
+  // 是两个不同 target），保留为前缀而不是剥掉——否则两者归一化后相撞。
+  let wrapper = '';
+  if (/^view-source:/i.test(text)) {
+    wrapper = 'view-source:';
+    text = text.replace(/^view-source:/i, '');
+  }
   // 地址栏可访问性文本常省略协议。"localhost:3000/x" 这类 host:port 会被
   // URL 解析成自定义协议，必须先排除：只有带 "//" 的绝对地址或已知的
   // 不透明协议才按原样解析，其余一律补 https:// 再归一化。
   const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(text) ||
-    /^(about|edge|chrome|devtools|data|javascript|mailto|view-source):/i.test(text);
+    /^(about|edge|chrome|devtools|data|javascript|mailto):/i.test(text);
   try {
     const parsed = new URL(hasScheme ? text : `https://${text}`);
     // 不透明协议（about:/edge:/data: 等）保留协议前缀作为身份的一部分，
@@ -36,31 +42,46 @@ function normalizeAddress(value) {
     const port = parsed.port ? `:${parsed.port}` : '';
     const pathname = (parsed.pathname || '/').replace(/\/{2,}/g, '/').replace(/\/$/, '') || '/';
     const search = parsed.search || '';
-    return `${schemePrefix}${host}${port}${pathname === '/' ? '' : pathname}${search}`.toLowerCase();
+    // URI 规范只有 scheme 与 host 大小写不敏感：路径/查询保留原大小写，
+    // 避免 /Case?T=A 与 /case?t=a 被错误合并。fragment 也保留——hash 路由
+    // 的单页应用靠它区分不同页面，丢掉会把不同标签当成同一个。
+    const hash = parsed.hash || '';
+    return `${wrapper}${schemePrefix}${host}${port}${pathname === '/' ? '' : pathname}${search}${hash}`;
   } catch {
-    return text
+    const stripped = text
       .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
       .replace(/^www\./i, '')
-      .replace(/\/$/, '')
-      .toLowerCase();
+      .replace(/\/$/, '');
+    // 无法解析时只把主机段（首个 /?# 之前）小写，其余保留大小写。
+    const boundary = stripped.search(/[/?#]/);
+    const head = boundary === -1 ? stripped : stripped.slice(0, boundary);
+    const tail = boundary === -1 ? '' : stripped.slice(boundary);
+    return `${wrapper}${head.toLowerCase()}${tail}`;
   }
 }
 
 function chooseTargetFromUia(targets, uiaState = {}, options = {}) {
   // options.allowedTargetIds：专用手机窗口模式下只允许跟随该窗口内的标签。
-  // 前台标签不在允许集合内时保持手机当前标签（保守，不猜测）。
+  // 作用域检查必须在"全集匹配"之后：若先把集合外目标删掉再匹配，"前台其实
+  // 是主窗口里同 URL 的标签"（本应保持不动）会被错判成专用窗口内的唯一命中
+  // ——过滤制造出假唯一。正确顺序：先在全部可控目标里判定前台是谁；判定出
+  // 的目标不在允许集合内，或跨集合内外存在歧义时，都保持当前标签不猜测。
   const allowed = options.allowedTargetIds
     ? new Set([...options.allowedTargetIds])
     : null;
+  const scoped = (result) => {
+    if (!result) return null;
+    const id = result.target.id ?? result.target.targetId;
+    return !allowed || allowed.has(id) ? result : null;
+  };
   const candidates = (Array.isArray(targets) ? targets : [])
-    .filter((target) => target && target.controllable !== false)
-    .filter((target) => !allowed || allowed.has(target.id ?? target.targetId));
+    .filter((target) => target && target.controllable !== false);
   if (!candidates.length || !uiaState || uiaState.edgeForeground !== true) return null;
 
   const address = normalizeAddress(uiaState.address);
   if (address) {
     const exactUrl = candidates.filter((target) => normalizeAddress(target.url) === address);
-    if (exactUrl.length === 1) return { target: exactUrl[0], confidence: 'url-exact' };
+    if (exactUrl.length === 1) return scoped({ target: exactUrl[0], confidence: 'url-exact' });
 
     // Edge sometimes omits the query string or a trailing path separator in the
     // address-bar accessibility value. Only accept a prefix match when unique.
@@ -69,21 +90,22 @@ function chooseTargetFromUia(targets, uiaState = {}, options = {}) {
     // "." 或 ":"）的值才允许前缀匹配；不确定时保持当前标签。
     const plausibleAddress = address.length >= 6 && /[.:]/.test(address);
     if (plausibleAddress) {
-      // 前缀必须终止在路径段/查询边界，避免 /foo 匹配到 /foobar。
+      // 前缀必须终止在路径段/查询/片段边界，避免 /foo 匹配到 /foobar；
+      // "#" 让省略了 hash 的地址栏文本仍能唯一命中自己的页面。
       const boundaryPrefix = (longer, shorter) => longer.startsWith(shorter) &&
-        (longer.length === shorter.length || ['/', '?', '&'].includes(longer[shorter.length]));
+        (longer.length === shorter.length || ['/', '?', '&', '#'].includes(longer[shorter.length]));
       const prefixUrl = candidates.filter((target) => {
         const candidate = normalizeAddress(target.url);
         return candidate && (boundaryPrefix(candidate, address) || boundaryPrefix(address, candidate));
       });
-      if (prefixUrl.length === 1) return { target: prefixUrl[0], confidence: 'url-prefix' };
+      if (prefixUrl.length === 1) return scoped({ target: prefixUrl[0], confidence: 'url-prefix' });
     }
   }
 
   const title = normalizeTabTitle(uiaState.tabTitle || uiaState.windowTitle);
   if (!title) return null;
   const exactTitle = candidates.filter((target) => normalizeTabTitle(target.title) === title);
-  if (exactTitle.length === 1) return { target: exactTitle[0], confidence: 'title-exact' };
+  if (exactTitle.length === 1) return scoped({ target: exactTitle[0], confidence: 'title-exact' });
 
   // Fuzzy title matching is intentionally conservative. Duplicate ChatGPT or
   // Claude titles are common; ambiguous matches must leave the phone on the
@@ -93,7 +115,7 @@ function chooseTargetFromUia(targets, uiaState = {}, options = {}) {
       const candidate = normalizeTabTitle(target.title);
       return candidate && (candidate.startsWith(title) || title.startsWith(candidate));
     });
-    if (partial.length === 1) return { target: partial[0], confidence: 'title-prefix' };
+    if (partial.length === 1) return scoped({ target: partial[0], confidence: 'title-prefix' });
   }
   return null;
 }

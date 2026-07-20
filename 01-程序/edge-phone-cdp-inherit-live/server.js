@@ -23,7 +23,7 @@ const {
   resolveNativeScales
 } = require('./lib/input-coordinates');
 
-const VERSION = '6.8.5';
+const VERSION = '6.8.6';
 const SERVICE_ID = 'edge-phone-cdp-controller';
 const ROOT_DIR = __dirname;
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
@@ -826,10 +826,6 @@ class ClientHub {
   framePressure() {
     const state = this.controllerState();
     if (!state) return { bufferedBytes: 0, renderMs: 0, awaitingAckMs: 0, droppedFrames: 0, ackTimeouts: 0 };
-    return this.clientFramePressure(state);
-  }
-
-  clientFramePressure(state) {
     const now = Date.now();
     const ackAge = state.lastFrameAck?.receivedAt ? now - state.lastFrameAck.receivedAt : Infinity;
     return {
@@ -839,21 +835,6 @@ class ClientHub {
       droppedFrames: state.droppedFrames || 0,
       ackTimeouts: state.frameAckTimeouts || 0
     };
-  }
-
-  // 帧都会广播给每台已连接手机：升降档要看最坏链路，不能只看控制端。
-  worstFramePressure() {
-    const worst = { bufferedBytes: 0, renderMs: 0, awaitingAckMs: 0, droppedFrames: 0, ackTimeouts: 0 };
-    for (const state of this.clients.values()) {
-      if (!state.ws || state.ws.readyState !== 1) continue;
-      const pressure = this.clientFramePressure(state);
-      worst.bufferedBytes = Math.max(worst.bufferedBytes, pressure.bufferedBytes);
-      worst.renderMs = Math.max(worst.renderMs, pressure.renderMs);
-      worst.awaitingAckMs = Math.max(worst.awaitingAckMs, pressure.awaitingAckMs);
-      worst.droppedFrames = Math.max(worst.droppedFrames, pressure.droppedFrames);
-      worst.ackTimeouts = Math.max(worst.ackTimeouts, pressure.ackTimeouts);
-    }
-    return worst;
   }
 
   publishRoles() {
@@ -1034,6 +1015,7 @@ class CdpController {
     this.lastAdaptiveSwitchAt = 0;
     this.adaptiveCandidate = null;
     this.adaptiveCandidateSince = 0;
+    this.clearProbeBlockedUntil = 0;
     this.viewportFallbackTimer = null;
     this.lastVisualDemandAt = 0;
     this.lastVisualDemandSequence = 0;
@@ -2809,10 +2791,12 @@ class CdpController {
     this.viewportFallbackTimer.unref?.();
   }
 
-  // 自动档升降决策。压力取所有已连接手机的最坏值：只看控制端会让弱网的
-  // 只读手机被高档位压成幻灯片而永远触发不了降档。
+  // 自动档升降决策。压力取控制端（当前操作的手机）：整条画面流是全局单一
+  // 质量，而每台手机各自有"最新帧优先"的独立限流（弱网只读端会被单独丢帧、
+  // 不会拖累别人），所以全局质量应服务于正在操作的控制端——用最坏值会让
+  // 一台卡住/半死的只读手机把整机压成幻灯片且再也升不回来。
   adaptiveLadderNext() {
-    const pressure = hub.worstFramePressure();
+    const pressure = hub.framePressure();
     const current = ['economy', 'realtime', 'balanced', 'clear'].includes(this.viewport.effectiveStreamPreset)
       ? this.viewport.effectiveStreamPreset
       : 'realtime';
@@ -2820,11 +2804,14 @@ class CdpController {
     const mild = pressure.bufferedBytes > 220 * 1024 || pressure.renderMs > 92 || pressure.awaitingAckMs > 180;
     const recovered = pressure.bufferedBytes < 96 * 1024 && pressure.renderMs > 0 && pressure.renderMs < 58 && pressure.awaitingAckMs < 90;
     // 链路"优秀"才允许从均衡升到清晰档（2.5× 采集 + 高 JPEG 质量）：缓冲
-    // 几乎清空、渲染与确认都很快，局域网直连通常满足。
+    // 几乎清空、渲染与确认都很快，局域网直连通常满足。清晰档若因过载被降下
+    // 来，clearProbeBlockedUntil 会压住一段时间再探测，避免"升清晰→过载→降
+    // 均衡→又探清晰"每 20 秒一次的抖动（每次都要重启截图、画面闪一下）。
     const excellent = pressure.bufferedBytes < 48 * 1024 && pressure.renderMs > 0 && pressure.renderMs < 46 && pressure.awaitingAckMs < 70;
+    const clearAllowed = excellent && Date.now() >= (this.clearProbeBlockedUntil || 0);
     if (current === 'economy') return recovered ? 'realtime' : 'economy';
     if (current === 'clear') return severe ? 'economy' : mild ? 'balanced' : 'clear';
-    if (current === 'balanced') return severe ? 'economy' : mild ? 'realtime' : excellent ? 'clear' : 'balanced';
+    if (current === 'balanced') return severe ? 'economy' : mild ? 'realtime' : clearAllowed ? 'clear' : 'balanced';
     return severe ? 'economy' : recovered ? 'balanced' : 'realtime';
   }
 
@@ -2851,6 +2838,10 @@ class CdpController {
     if (!isDowngrade && (now - this.lastAdaptiveSwitchAt < 20000 || now - this.lastScreencastStartAt < 12000)) return;
 
     const sequenceAtStart = this.lastFrameSequence;
+    // 从清晰档因过载被降下来：压住清晰档探测 3 分钟，打断 20 秒周期的抖动。
+    if (this.viewport.effectiveStreamPreset === 'clear' && isDowngrade) {
+      this.clearProbeBlockedUntil = now + 180000;
+    }
     this.viewport.effectiveStreamPreset = next;
     this.lastAdaptiveSwitchAt = now;
     this.adaptiveCandidate = null;
@@ -4639,6 +4630,11 @@ const controllerOnlyTypes = new Set([
   'clipboardGet', 'clipboardSet', 'dedicatedWindow', 'rotateToken'
 ]);
 
+// 认证代数：连接建立时盖上当前代，令牌轮换时代数自增并关闭所有旧代连接。
+// 只改全局令牌字符串是不够的——那只挡得住"新建连接"，已认证的旧会话仍能
+// claimControl 并继续注入输入/读取剪贴板，与"轮换即撤销"的界面承诺不符。
+let authEpoch = 1;
+
 function reply(ws, requestId, result = {}) {
   if (!requestId) return;
   sendJson(ws, { type: 'reply', requestId, ok: true, result });
@@ -4654,6 +4650,7 @@ function replyError(ws, requestId, error) {
 
 wss.on('connection', (ws, req, info) => {
   const state = hub.add(ws, info);
+  state.authEpoch = authEpoch;
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 
@@ -4751,6 +4748,11 @@ wss.on('connection', (ws, req, info) => {
   async function handleCommand(message) {
     const requestId = message.requestId;
     try {
+      // 认证代数检查先于一切命令（包括 claimControl）：令牌轮换后旧代连接
+      // 不得再产生任何副作用，即使关闭帧尚未到达对端。
+      if (state.authEpoch !== authEpoch) {
+        throw new Error('访问令牌已轮换，本连接已失效，请使用新链接重新连接。');
+      }
       if (message.type === 'claimControl') {
         if (hub.controllerClientId && hub.controllerClientId !== state.clientId) {
           await cdp.releaseActiveInput('控制权切换');
@@ -4796,13 +4798,21 @@ wss.on('connection', (ws, req, info) => {
         return;
       }
       if (message.type === 'rotateToken') {
-        // 令牌轮换只能由已认证的控制端手机触发。轮换后当前连接仍有效（本次
-        // 连接已通过认证），把新令牌回给发起方以便更新并重连；其他旧令牌立即失效。
+        // 令牌轮换只能由已认证的控制端手机触发。轮换 = 撤销：发起连接保留
+        // （新令牌已回给它），其余已认证连接一律提升认证代数后以 4003 关闭
+        // ——只广播提示是不够的，已建立的会话不受令牌字符串变化影响，仍能
+        // claimControl 并继续注入命令。
         const rotated = rotateAccessToken();
-        log('warn', '用户轮换了访问令牌', { pinned: false });
+        authEpoch += 1;
+        state.authEpoch = authEpoch;
+        log('warn', '用户轮换了访问令牌并撤销其余连接', { revoked: Math.max(0, hub.clients.size - 1) });
         printAccessUrls('令牌已轮换，请在手机上使用新地址：');
         reply(ws, requestId, { token: rotated });
-        hub.broadcastJsonExcept(ws, { type: 'status', level: 'warn', message: '访问令牌已在电脑上轮换，请用新链接重新连接。' });
+        for (const [otherWs] of hub.clients) {
+          if (otherWs === ws) continue;
+          sendJson(otherWs, { type: 'status', level: 'warn', message: '访问令牌已在电脑上轮换，本连接即将断开，请用新链接重新连接。' });
+          try { otherWs.close(4003, 'token-rotated'); } catch {}
+        }
         return;
       }
       if (message.type === 'browserHistory') {
@@ -5161,6 +5171,9 @@ wss.on('connection', (ws, req, info) => {
 
   ws.on('message', (raw, isBinary) => {
     state.lastSeenAt = Date.now();
+    // 旧认证代的连接：丢弃一切入站数据（文本命令、触摸、二进制上传块）。
+    // 关闭帧已发出，但到达前的在途消息不得再产生副作用。
+    if (state.authEpoch !== authEpoch) return;
     if (isBinary) {
       messageQueue = messageQueue.then(() => handleBinaryUpload(raw)).catch(async (error) => {
         replyError(ws, null, error);

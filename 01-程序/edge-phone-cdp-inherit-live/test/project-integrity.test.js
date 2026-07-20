@@ -204,10 +204,12 @@ assert.ok(app.includes("request('pullEditableText'"));
 assert.ok(server.includes('用户触发取回输入框文本（一次性只读检查）'));
 assert.ok(app.includes("granularity: 'grapheme'"));
 
-// 自动画面档阶梯必须包含"清晰"档：链路优秀时可升到 2× 采集（局域网场景
-// 的清晰度主要来源），有压力时逐级回落。
+// 自动画面档阶梯必须包含"清晰"档：链路优秀时可升到 2.5× 采集（局域网场景
+// 的清晰度主要来源），有压力时逐级回落；升降决策基于控制端压力，且清晰档
+// 过载降档后有探测退避避免抖动。
 assert.ok(server.includes("['economy', 'realtime', 'balanced', 'clear'].includes(this.viewport.effectiveStreamPreset)"));
-assert.ok(server.includes("excellent ? 'clear'"));
+assert.ok(server.includes("clearAllowed ? 'clear'"));
+assert.ok(server.includes('clearProbeBlockedUntil'));
 assert.ok(!server.includes('__edge_phone_cdp_calibration_marker__'));
 assert.ok(!server.includes("document.createElement('div')"), '校准不得向目标页面插入 DOM');
 
